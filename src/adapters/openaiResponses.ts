@@ -67,6 +67,7 @@ type ResponsesInputItem =
 
 export class OpenAIResponsesAdapter extends BaseAdapter {
 	private _responseId: string | null = null;
+	private _responsesDeltaEmitted = false;
 
 	get responseId(): string | null {
 		return this._responseId;
@@ -306,14 +307,14 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 
 			case "response.output_text.delta":
 			case "response.refusal.delta": {
-				this._hasEmittedText = false;
+				this._responsesDeltaEmitted = true;
 				const delta = this.coerceText(event.delta);
 				this.processOutputText(delta, progress);
 				return;
 			}
 
 			case "response.output_text.done": {
-				if (this._hasEmittedText) { this._hasEmittedText = false; return; }
+				if (this._responsesDeltaEmitted) { this._responsesDeltaEmitted = false; return; }
 				this.processOutputText(this.coerceText(event.text), progress);
 				return;
 			}

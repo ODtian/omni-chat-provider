@@ -27,9 +27,21 @@ export async function executeWithRetry<T>(
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= config.maxAttempts; attempt++) {
+		let timeoutId: NodeJS.Timeout | undefined;
+		const timeoutPromise = config.timeoutMs > 0
+			? new Promise<T>((_, reject) => {
+					timeoutId = setTimeout(() => reject(new Error(`Request timed out after ${config.timeoutMs}ms [TIMEOUT]`)), config.timeoutMs);
+			  })
+			: null;
+
 		try {
-			return await fn();
+			const result = timeoutPromise
+				? await Promise.race([fn(), timeoutPromise])
+				: await fn();
+			if (timeoutId) { clearTimeout(timeoutId); }
+			return result;
 		} catch (error) {
+			if (timeoutId) { clearTimeout(timeoutId); }
 			lastError = error instanceof Error ? error : new Error(String(error));
 
 			const isRetryableStatus = retryableCodes.some((code) =>
@@ -38,12 +50,17 @@ export async function executeWithRetry<T>(
 			const isRetryableNetwork = NETWORK_ERROR_PATTERNS.some((pattern) =>
 				lastError?.message.includes(pattern)
 			);
+			const isTimeout = lastError?.message.includes("[TIMEOUT]");
+			const isEmptyResponse = lastError?.message.includes("[EMPTY_RESPONSE]");
 
-			if ((!isRetryableStatus && !isRetryableNetwork) || attempt === config.maxAttempts) {
+			if (
+				(!isRetryableStatus && !isRetryableNetwork && !isTimeout && !isEmptyResponse) ||
+				attempt === config.maxAttempts
+			) {
 				throw lastError;
 			}
 
-			console.error(
+			console.warn(
 				`[OmniChat] Retrying in ${config.intervalMs}ms (attempt ${attempt + 1}/${config.maxAttempts}):`,
 				lastError.message
 			);

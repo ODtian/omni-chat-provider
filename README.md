@@ -1,162 +1,302 @@
 # Omni Chat Provider
 
-A language model chat provider for VS Code's Copilot interface. This extension allows you to use models from multiple providers (OpenAI, Anthropic, Gemini, Ollama, and compatible gateways) directly within the GitHub Copilot Chat interface.
+Use OpenAI, Anthropic, Gemini, Ollama, and OpenAI-compatible backends inside VS Code Copilot Chat through one extension.
 
-## 🌟 Architecture & Advantages
+The extension contributes a single vendor, `OmniChat`, to Copilot's language model system. Each model group in `Chat: Manage Language Models` points at one configured `providerId`, so removing a group only removes the Copilot-side mount. Your own `omnichat.providers`, `omnichat.models`, and stored API keys stay intact.
 
-This is a modern rewrite of the OAI Compatible Copilot provider. It is designed around two key concepts:
-1. **Multi-Provider First**: Manage distinct configurations and API keys for different backends.
-2. **Native API Adapters**: Connect directly to various AI services using their native payload formats, not just OpenAI completions.
+## Features
 
-### Supported API Modes
+- Native adapters for `openai`, `openai-responses`, `anthropic`, `gemini`, and `ollama`
+- Provider-level connection settings with model-level overrides
+- Per-provider API keys stored in VS Code Secret Storage
+- Native Copilot model management via `Chat: Manage Language Models`
+- Stable internal model routing with clean picker labels
+- Retry, delay, custom headers, and system-prompt interception
+- Optional model variants via `configId`
+- Commit message generation command
 
-- `openai` — Standard `/v1/chat/completions` API (used by OpenAI and most compatible gateways).
-- `openai-responses` — OpenAI's stateful `/v1/responses` API (allows Copilot to thread conversations natively and leverage prompt caching).
-- `anthropic` — Anthropic's `/v1/messages` API with native support for `thinking` budgets.
-- `gemini` — Google's Gemini `/v1beta/models/{model}:streamGenerateContent` API.
-- `ollama` — Local Ollama `/api/chat` interface with native parameter parsing.
+## How It Works
 
-## ⚙️ Configuration
+There are three layers:
 
-Configure providers and models in your VS Code `settings.json`.
+1. `omnichat.providers`
+   Defines backend connections such as `baseUrl`, `apiMode`, and shared headers.
+2. `omnichat.models`
+   Defines the actual models shown in Copilot, each mapped to a provider via `provider` or `owned_by`.
+3. `Chat: Manage Language Models`
+   Creates Copilot model groups that attach one `providerId` to the `OmniChat` vendor.
 
-### 1. Define Providers
+Deleting a Copilot group does not delete OmniChat settings or OmniChat secrets.
 
-Providers act as templates or "backends". Models inherit `baseUrl`, `apiMode`, and custom `headers` from their provider.
+## Requirements
 
-```jsonc
-"omnichat.providers": [
-    {
-        "id": "openai",
-        "baseUrl": "https://api.openai.com/v1",
-        "apiMode": "openai"
-    },
-    {
-        "id": "anthropic",
-        "baseUrl": "https://api.anthropic.com",
-        "apiMode": "anthropic"
-    },
-    {
-        "id": "ollama",
-        "baseUrl": "http://localhost:11434",
-        "apiMode": "ollama"
-    }
-]
-```
+- VS Code `1.104+`
+- GitHub Copilot Chat installed
 
-### 2. Define Models
+## Setup
 
-Models appear in the VS Code Copilot model picker. You map them back to a provider via `provider` (or `owned_by`).
+### 1. Install the extension
 
-```jsonc
-"omnichat.models": [
-    {
-        "id": "gpt-4o",
-        "provider": "openai",
-        "context_length": 128000,
-        "max_completion_tokens": 8192,
-        "vision": true
-    },
-    {
-        "id": "o1-pro",
-        "provider": "openai",
-        "reasoning_effort": "xhigh", // OpenAI reasoning effort
-        "max_completion_tokens": 65536
-    },
-    {
-        "id": "claude-3-7-sonnet-20250219",
-        "provider": "anthropic",
-        "thinking": {
-            "type": "enabled",
-            "budget_tokens": 16384 // Native Anthropic thinking budget
-        }
-    },
-    {
-        "id": "llama3",
-        "provider": "ollama",
-        "num_ctx": 32768, // Native Ollama context window
-        "temperature": 0.5
-    }
-]
-```
+Install the VSIX or install from Open VSX after publishing.
 
-### 3. Set API Keys
+### 2. Define providers
 
-API keys are securely stored in VS Code's Secret Storage, strictly associated with the provider ID.
-
-Open the Command Palette (`Ctrl+Shift+P` / `Cmd+Shift+P`) and search:
-**OmniChat: Set API Key (Per Provider)**
-
-Select your provider (e.g., `openai`, `anthropic`) and paste your API key.
-
-## 🔧 Model-Specific Parameters
-
-Each API mode accepts its native configuration fields within the `omnichat.models` array. Only parameters relevant to the selected `apiMode` are forwarded to the API.
-
-Instead of translating parameters (e.g., trying to map OpenAI's `max_tokens` to Gemini's `maxOutputTokens`), the extension reads the native parameter directly.
-
-### Common Options
-- `context_length`: The max context size to advertise to Copilot.
-- `vision` (boolean): Whether this model accepts image input.
-- `temperature` / `top_p`: Standard sampling parameters.
-
-### OpenAI (`apiMode: "openai"`)
-- `max_completion_tokens`: The maximum number of tokens to generate.
-- `reasoning_effort`: Set to `"xhigh"`, `"high"`, `"medium"`, or `"low"`.
-- `frequency_penalty`, `presence_penalty`.
-
-### OpenAI Responses (`apiMode: "openai-responses"`)
-- `max_output_tokens`: Maximum output tokens.
-- `reasoning`: Object containing `effort` and `max_tokens`.
-
-### Anthropic (`apiMode: "anthropic"`)
-- `max_tokens`: Maximum tokens to generate.
-- `thinking`: Object to enable extended thinking. Example: `{ "type": "enabled", "budget_tokens": 1024 }`
-- `top_k`.
-
-### Gemini (`apiMode: "gemini"`)
-- `maxOutputTokens`: Maximum tokens to generate.
-- `thinkingConfig`: Object to enable thinking. Example: `{ "thinkingBudget": 1024 }`
-- `topK`, `topP`.
-
-### Ollama (`apiMode: "ollama"`)
-- `num_predict`: Maximum tokens to generate.
-- `num_ctx`: Context window size.
-- `repeat_penalty`, `seed`, `stop`, etc.
-
-## 🛠 Advanced Features
-
-### Custom Headers
-You can supply global or per-provider HTTP headers. This is especially useful for setting API version headers for Anthropic.
+Add provider backends in `settings.json`:
 
 ```jsonc
 "omnichat.providers": [
-    {
-        "id": "anthropic",
-        "baseUrl": "https://api.anthropic.com",
-        "apiMode": "anthropic",
-        "headers": {
-            "anthropic-version": "2023-06-01"
-        }
+  {
+    "id": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiMode": "openai"
+  },
+  {
+    "id": "anthropic",
+    "baseUrl": "https://api.anthropic.com",
+    "apiMode": "anthropic",
+    "headers": {
+      "anthropic-version": "2023-06-01"
     }
+  },
+  {
+    "id": "ollama",
+    "baseUrl": "http://localhost:11434",
+    "apiMode": "ollama"
+  }
 ]
 ```
 
-### Delay Rate Limiting
-Prevent rate-limits by adding a minimum delay between consecutive requests to the same model.
+### 3. Define models
+
+Each model must point at a provider:
 
 ```jsonc
 "omnichat.models": [
-    {
-        "id": "gemini-flash",
-        "provider": "gemini",
-        "delay": 1500 // Wait at least 1500ms between chunks/requests
+  {
+    "id": "gpt-5.4",
+    "provider": "openai",
+    "context_length": 128000,
+    "max_completion_tokens": 8192,
+    "vision": true
+  },
+  {
+    "id": "gpt-5.4",
+    "provider": "openai",
+    "configId": "reasoning",
+    "reasoning_effort": "high",
+    "max_completion_tokens": 16384
+  },
+  {
+    "id": "claude-sonnet-4",
+    "provider": "anthropic",
+    "max_tokens": 8192,
+    "thinking": {
+      "type": "enabled",
+      "budget_tokens": 4096
     }
+  },
+  {
+    "id": "llama3.1:70b",
+    "provider": "ollama",
+    "num_ctx": 32768,
+    "temperature": 0.4
+  }
 ]
 ```
 
-### Extra Parameters
-Any unsupported fields placed in an `extra` object are shallow-merged directly into the request JSON payload.
+### 4. Add or edit a provider
 
-## 💡 Note on Copilot Chat Features
-This extension registers as a `LanguageModelChatProvider`. To use these models, you must have the **GitHub Copilot Chat** extension installed. You will see these models populated inside the Copilot Chat model picker under the label **Omni Chat Provider**.
+Run:
+
+`OmniChat: Edit Provider`
+
+This flow lets you:
+
+- Pick an existing provider and edit its `apiMode`, `baseUrl`, and API key
+- Add a new provider with the same form
+
+Provider API keys are stored in VS Code Secret Storage under `omnichat.apiKey.<providerId>`.
+
+### 5. Mount the provider into Copilot
+
+Run:
+
+`Chat: Manage Language Models`
+
+Then:
+
+1. Add a new language model group
+2. Choose `OmniChat`
+3. Enter the `providerId` you want to mount
+
+That group will now expose only the models belonging to that provider.
+
+## Configuration Reference
+
+### `omnichat.providers`
+
+Provider-level backend settings:
+
+- `id`
+- `baseUrl`
+- `apiMode`
+- `headers`
+
+### `omnichat.models`
+
+Model-level settings:
+
+- `id`
+- `provider` or `owned_by`
+- `configId`
+- `displayName`
+- `family`
+- `context_length`
+- `vision`
+- `temperature`
+- `top_p`
+- `headers`
+- `delay`
+- `extra`
+- `useForCommitGeneration`
+- `include_reasoning_in_request`
+
+### API-specific model fields
+
+#### OpenAI
+
+- `max_tokens`
+- `max_completion_tokens`
+- `reasoning_effort`
+- `frequency_penalty`
+- `presence_penalty`
+
+#### OpenAI Responses
+
+- `max_output_tokens`
+- `reasoning`
+
+#### Anthropic
+
+- `max_tokens`
+- `thinking`
+- `top_k`
+
+#### Gemini
+
+- `maxOutputTokens`
+- `topK`
+- `topP`
+- `thinkingConfig`
+
+#### Ollama
+
+- `num_predict`
+- `num_ctx`
+- `num_gpu`
+- `top_k`
+- `min_p`
+- `repeat_penalty`
+
+### Retry
+
+```jsonc
+"omnichat.retry": {
+  "enabled": true,
+  "maxAttempts": 3,
+  "intervalMs": 1000,
+  "statusCodes": [429, 500, 502, 503, 504],
+  "retryEmptyResponse": true,
+  "timeoutMs": 120000
+}
+```
+
+### Delay
+
+Global:
+
+```jsonc
+"omnichat.delay": 1000
+```
+
+Per model:
+
+```jsonc
+{
+  "id": "gemini-flash",
+  "provider": "gemini",
+  "delay": 1500
+}
+```
+
+### System prompt handling
+
+```jsonc
+"omnichat.systemPrompt.mode": "passthrough",
+"omnichat.systemPrompt.content": ""
+```
+
+Modes:
+
+- `passthrough`
+- `replace`
+- `append`
+- `disable`
+
+## Build
+
+Install dependencies:
+
+```bash
+pnpm ci
+```
+
+Compile:
+
+```bash
+pnpm run compile
+```
+
+Package VSIX:
+
+```bash
+pnpm run package
+```
+
+## GitHub Actions
+
+The repository includes `.github/workflows/openvsx.yml`.
+
+It does two jobs:
+
+- Build and package `extension.vsix`
+- Publish that VSIX to Open VSX using `OPENVSX_TOKEN`
+
+### Required secret
+
+Set this repository secret before publishing:
+
+- `OPENVSX_TOKEN`
+
+### Triggering publish
+
+Publishing runs on:
+
+- Manual workflow dispatch
+- Git tag pushes matching `v*`
+
+## Open VSX Publishing
+
+Local publish:
+
+```bash
+pnpm run package
+pnpm run publish:openvsx
+```
+
+This uses:
+
+- `pnpx @vscode/vsce package`
+- `pnpx ovsx publish --packagePath extension.vsix`
+
+You still need a valid Open VSX token in your environment as `OVSX_PAT`.

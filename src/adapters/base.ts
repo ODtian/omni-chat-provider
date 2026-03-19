@@ -60,6 +60,14 @@ export abstract class BaseAdapter {
 	protected _systemContent: string | undefined;
 
 	/**
+	 * Returns true if any text, thinking, or tool call has been emitted.
+	 * Used to determine if the response was completely empty.
+	 */
+	public get hasEmittedAnyContent(): boolean {
+		return this._hasEmittedText || this._hasEmittedThinking || this._completedToolCallIndices.size > 0;
+	}
+
+	/**
 	 * Convert VS Code chat messages to API-specific format.
 	 */
 	abstract convertMessages(
@@ -188,6 +196,7 @@ export abstract class BaseAdapter {
 		progress: Progress<LanguageModelResponsePart2>
 	): { emittedAny: boolean } {
 		if (input.length > 0) {
+			this._hasEmittedText = true;
 			progress.report(new LanguageModelTextPart(input));
 			return { emittedAny: true };
 		}

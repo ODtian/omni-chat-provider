@@ -2,7 +2,13 @@
 // Type-safe configuration access
 // ──────────────────────────────────────────────────────────────
 import * as vscode from "vscode";
-import type { ModelItem, ProviderItem, RetryConfig, SystemPromptMode } from "./types";
+import type {
+	ModelItem,
+	ParsedScopedModelId,
+	ProviderItem,
+	RetryConfig,
+	SystemPromptMode,
+} from "./types";
 
 const SECTION = "omnichat";
 
@@ -31,6 +37,39 @@ export class Config {
 		return normalizeModels(raw, providers);
 	}
 
+	static getProviderById(providerId: string): ProviderItem | undefined {
+		const normalized = normalizeProviderId(providerId);
+		if (!normalized) { return undefined; }
+		return Config.getProviders().find((provider) =>
+			normalizeProviderId(provider.id) === normalized
+		);
+	}
+
+	static listProviderIds(): string[] {
+		const providerIds = new Set<string>();
+		for (const provider of Config.getProviders()) {
+			const normalized = normalizeProviderId(provider.id);
+			if (normalized) {
+				providerIds.add(normalized);
+			}
+		}
+		for (const model of Config.getModels()) {
+			const normalized = normalizeProviderId(model.owned_by);
+			if (normalized) {
+				providerIds.add(normalized);
+			}
+		}
+		return [...providerIds].sort();
+	}
+
+	static getModelsForProvider(providerId: string): ModelItem[] {
+		const normalized = normalizeProviderId(providerId);
+		if (!normalized) { return []; }
+		return Config.getModels().filter(
+			(model) => normalizeProviderId(model.owned_by) === normalized
+		);
+	}
+
 	// ── Connection ──
 
 	static getBaseUrl(): string {
@@ -50,6 +89,8 @@ export class Config {
 			maxAttempts: raw.maxAttempts ?? 3,
 			intervalMs: raw.intervalMs ?? 1000,
 			statusCodes: raw.statusCodes ?? [],
+			retryEmptyResponse: raw.retryEmptyResponse ?? true,
+			timeoutMs: raw.timeoutMs ?? 120000,
 		};
 	}
 
@@ -113,6 +154,10 @@ function getProviderId(obj: Record<string, unknown>): string {
 	);
 }
 
+function normalizeProviderId(value: string | undefined): string {
+	return value?.trim().toLowerCase() ?? "";
+}
+
 function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 	const providerMap = new Map<string, ProviderItem>();
 	for (const p of providers) {
@@ -155,13 +200,44 @@ function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 	return out;
 }
 
-/**
- * Parse a model ID that may contain `::configId`.
- */
-export function parseModelId(modelId: string): { baseId: string; configId?: string } {
-	const idx = modelId.indexOf("::");
-	if (idx >= 0) {
-		return { baseId: modelId.slice(0, idx), configId: modelId.slice(idx + 2) };
+function encodeModelSegment(value: string): string {
+	return encodeURIComponent(value);
+}
+
+function decodeModelSegment(value: string): string {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return value;
 	}
-	return { baseId: modelId };
+}
+
+export function buildScopedModelId(model: Pick<ModelItem, "owned_by" | "id" | "configId">): string {
+	const scopedId = `${encodeModelSegment(model.owned_by)}/${encodeModelSegment(model.id)}`;
+	return model.configId
+		? `${scopedId}::${encodeModelSegment(model.configId)}`
+		: scopedId;
+}
+
+/**
+ * Parse a model ID in `<providerId>/<id>::<configId>` format.
+ */
+export function parseScopedModelId(modelId: string): ParsedScopedModelId {
+	const configIdx = modelId.indexOf("::");
+	const scopedPart = configIdx >= 0 ? modelId.slice(0, configIdx) : modelId;
+	const slashIdx = scopedPart.indexOf("/");
+
+	if (slashIdx < 0) {
+		return {
+			providerId: "",
+			baseId: decodeModelSegment(scopedPart),
+			configId: configIdx >= 0 ? decodeModelSegment(modelId.slice(configIdx + 2)) : undefined,
+		};
+	}
+
+	return {
+		providerId: decodeModelSegment(scopedPart.slice(0, slashIdx)),
+		baseId: decodeModelSegment(scopedPart.slice(slashIdx + 1)),
+		configId: configIdx >= 0 ? decodeModelSegment(modelId.slice(configIdx + 2)) : undefined,
+	};
 }

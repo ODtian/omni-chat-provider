@@ -3,7 +3,6 @@
 	"publisher": "johnny-zhao",
 	"displayName": "Omni Chat Provider",
 	"description": "A universal language model chat provider for VS Code — supports OpenAI, Anthropic, Gemini, Ollama and any OAI-compatible endpoint.",
-	"icon": "assets/logo.png",
 	"keywords": [
 		"ai", "chat", "copilot", "language-model", "llm",
 		"openai", "anthropic", "gemini", "ollama",
@@ -23,12 +22,23 @@
 	"categories": ["AI", "Chat"],
 	"license": "MIT",
 	"enabledApiProposals": ["chatProvider"],
+	"activationEvents": ["onStartupFinished"],
 	"contributes": {
 		"languageModelChatProviders": [
 			{
 				"vendor": "omnichat",
 				"displayName": "Omni Chat",
-				"managementCommand": "omnichat.setApiKey"
+				"configuration": {
+					"type": "object",
+					"required": ["providerId"],
+					"additionalProperties": false,
+					"properties": {
+						"providerId": {
+							"type": "string",
+							"description": "Existing OmniChat provider ID from `omnichat.providers` or referenced by `omnichat.models`."
+						}
+					}
+				}
 			}
 		],
 		"commands": [
@@ -38,9 +48,9 @@
 				"title": "Set API Key (Global)"
 			},
 			{
-				"command": "omnichat.setProviderApiKey",
+				"command": "omnichat.editProvider",
 				"category": "OmniChat",
-				"title": "Set API Key (Per Provider)"
+				"title": "Edit Provider"
 			},
 			{
 				"command": "omnichat.generateCommitMessage",
@@ -230,7 +240,7 @@
 										},
 										"reasoning_effort": {
 											"type": "string",
-											"enum": ["high", "medium", "low"],
+											"enum": ["xhigh", "high", "medium", "low"],
 											"description": "[OpenAI] Reasoning effort level for o-series models."
 										},
 										"frequency_penalty": {
@@ -265,7 +275,7 @@
 											"properties": {
 												"effort": {
 													"type": "string",
-													"enum": ["high", "medium", "low"],
+													"enum": ["xhigh", "high", "medium", "low"],
 													"description": "Reasoning effort level."
 												},
 												"max_tokens": {
@@ -430,6 +440,40 @@
 					"minimum": 0,
 					"description": "Global delay (ms) between consecutive requests. Per-model `delay` overrides this."
 				},
+				"omnichat.retry.enabled": {
+					"type": "boolean",
+					"default": true,
+					"description": "Enable automatic retry on transient errors or empty responses."
+				},
+				"omnichat.retry.maxAttempts": {
+					"type": "number",
+					"default": 3,
+					"minimum": 0,
+					"description": "Maximum number of retry attempts."
+				},
+				"omnichat.retry.intervalMs": {
+					"type": "number",
+					"default": 1000,
+					"minimum": 0,
+					"description": "Base delay (ms) between retry attempts."
+				},
+				"omnichat.retry.statusCodes": {
+					"type": "array",
+					"items": { "type": "number" },
+					"default": [429, 500, 502, 503, 504],
+					"description": "HTTP status codes that trigger a retry."
+				},
+				"omnichat.retry.timeoutMs": {
+					"type": "number",
+					"default": 120000,
+					"minimum": 0,
+					"description": "Timeout (ms) for each request attempt. 0 means no timeout."
+				},
+				"omnichat.retry.retryEmptyResponse": {
+					"type": "boolean",
+					"default": true,
+					"description": "Automatically retry if the API returns an empty response."
+				},
 				"omnichat.systemPrompt.mode": {
 					"type": "string",
 					"enum": ["passthrough", "replace", "append", "disable"],
@@ -475,7 +519,9 @@
 		"format": "prettier --write .",
 		"watch": "tsc -watch -p ./",
 		"test": "npm run compile && vscode-test",
-		"build": "npx @vscode/vsce package -o extension.vsix"
+		"build": "npm run package",
+		"package": "npx @vscode/vsce package -o extension.vsix",
+		"publish:openvsx": "npx ovsx publish --packagePath extension.vsix"
 	},
 	"dependencies": {
 		"@microsoft/tiktokenizer": "^1.0.10"

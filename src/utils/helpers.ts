@@ -94,3 +94,53 @@ export function collectToolResultText(
 	}
 	return text;
 }
+
+/**
+ * Show an input box with a toggleable password visibility button.
+ */
+export function showPasswordInputBox(options: {
+	title: string;
+	prompt: string;
+	value?: string;
+}): Promise<string | undefined> {
+	return new Promise((resolve) => {
+		let resolved = false;
+		const input = vscode.window.createInputBox();
+		input.title = options.title;
+		input.prompt = options.prompt;
+		input.value = options.value ?? "";
+		input.password = true;
+		input.ignoreFocusOut = true;
+
+		const eyeIcon = new vscode.ThemeIcon("eye");
+		const eyeClosedIcon = new vscode.ThemeIcon("eye-closed");
+
+		const toggleBtn = {
+			iconPath: eyeClosedIcon,
+			tooltip: "Show Password"
+		};
+
+		input.buttons = [toggleBtn];
+
+		input.onDidTriggerButton((btn) => {
+			if (btn === toggleBtn) {
+				input.password = !input.password;
+				toggleBtn.iconPath = input.password ? eyeClosedIcon : eyeIcon;
+				toggleBtn.tooltip = input.password ? "Show Password" : "Hide Password";
+				input.buttons = [toggleBtn];
+			}
+		});
+
+		input.onDidAccept(() => {
+			if (!resolved) { resolved = true; resolve(input.value); }
+			input.hide();
+		});
+
+		input.onDidHide(() => {
+			if (!resolved) { resolved = true; resolve(undefined); }
+			input.dispose();
+		});
+
+		input.show();
+	});
+}

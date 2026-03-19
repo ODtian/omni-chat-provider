@@ -66,13 +66,16 @@ export interface RetryConfig {
 	maxAttempts?: number;
 	intervalMs?: number;
 	statusCodes?: number[];
+	retryEmptyResponse?: boolean;
+	timeoutMs?: number;
 }
 
 /** System prompt interception mode. */
 export type SystemPromptMode = "passthrough" | "replace" | "append" | "disable";
 
-/** Parsed model ID (handles the `id::configId` format). */
-export interface ParsedModelId {
+/** Parsed model ID (handles the `<providerId>/<id>::<configId>` format). */
+export interface ParsedScopedModelId {
+	providerId: string;
 	baseId: string;
 	configId?: string;
 }

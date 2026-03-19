@@ -1,6 +1,3 @@
-// ──────────────────────────────────────────────────────────────
-// Provider — thin orchestration layer
-// ──────────────────────────────────────────────────────────────
 import * as vscode from "vscode";
 import {
 	CancellationToken,
@@ -12,13 +9,12 @@ import {
 	ProvideLanguageModelChatResponseOptions,
 } from "vscode";
 
-import type { ModelItem, ApiMode } from "./types";
-import { Config, parseModelId } from "./config";
+import type { ApiMode, ModelItem } from "./types";
+import { buildScopedModelId, Config, parseScopedModelId } from "./config";
 import { ApiKeyManager } from "./services/apiKeyManager";
 import { executeWithRetry } from "./services/retryService";
 import { interceptSystemPrompt } from "./prompt/interceptor";
 
-// Adapters
 import { BaseAdapter } from "./adapters/base";
 import { OpenAIAdapter } from "./adapters/openai";
 import { OpenAIResponsesAdapter } from "./adapters/openaiResponses";
@@ -29,12 +25,17 @@ import { OllamaAdapter } from "./adapters/ollama";
 const DEFAULT_CONTEXT_LENGTH = 128000;
 const DEFAULT_MAX_TOKENS = 4096;
 const EXTENSION_LABEL = "OmniChat";
-
-// ── Stateful marker for Responses API ──
 const STATEFUL_MARKER_MIME = "application/vnd.omnichat.stateful-marker";
 
+interface ProviderGroupConfiguration {
+	providerId?: string;
+}
+
 /**
- * Omni Chat Provider — universal language model provider for VS Code.
+ * Single OmniChat vendor provider.
+ *
+ * VS Code manages multiple OmniChat groups using the contributed
+ * `configuration` schema. Each group selects a single `providerId`.
  */
 export class OmniChatProvider implements LanguageModelChatProvider {
 	private _lastRequestTime: number | null = null;
@@ -48,57 +49,83 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		return this._keyManager;
 	}
 
-	// ── Model listing ──
-
 	async provideLanguageModelChatInformation(
-		_options: { silent: boolean },
+		options: { silent?: boolean; configuration?: Record<string, any> },
 		_token: CancellationToken
 	): Promise<LanguageModelChatInformation[]> {
-		const models = Config.getModels();
-
-		if (!models.length) {
+		const groupConfig = this.parseGroupConfiguration(options.configuration);
+		const groupName = typeof (options as any).group === "string"
+			? (options as any).group
+			: undefined;
+		if (!groupConfig.providerId) {
 			return [];
 		}
 
+		const configuredProvider = Config.getProviderById(groupConfig.providerId);
+		const providerModels = Config.getModelsForProvider(groupConfig.providerId);
+		if (!configuredProvider && providerModels.length === 0) {
+			throw new Error(
+				`Provider "${groupConfig.providerId}" is not defined in omnichat.providers or omnichat.models.`
+			);
+		}
+
+		return this.getScopedModels(groupConfig.providerId, groupName);
+	}
+
+	private parseGroupConfiguration(configuration?: Record<string, any>): ProviderGroupConfiguration {
+		const providerId = typeof configuration?.providerId === "string"
+			? configuration.providerId.trim()
+			: "";
+
+		return {
+			providerId: providerId || undefined,
+		};
+	}
+
+	private getScopedModels(providerId: string, groupLabel?: string): LanguageModelChatInformation[] {
+		const models = Config.getModelsForProvider(providerId);
+		const detailLabel = groupLabel?.trim() || providerId;
+
 		return models
-			.filter((m) => !m.id.startsWith("__provider__"))
-			.map((m) => {
-				const contextLen = m.context_length ?? DEFAULT_CONTEXT_LENGTH;
-				const maxOutput = this.getMaxOutputTokens(m) ?? DEFAULT_MAX_TOKENS;
+			.filter((model) => !model.id.startsWith("__provider__"))
+			.map((model) => {
+				const contextLen = model.context_length ?? DEFAULT_CONTEXT_LENGTH;
+				const maxOutput = this.getMaxOutputTokens(model) ?? DEFAULT_MAX_TOKENS;
 				const maxInput = Math.max(1, contextLen - maxOutput);
-				const modelId = m.configId ? `${m.id}::${m.configId}` : m.id;
-				const modelName = m.displayName || modelId;
-				const detail = m.owned_by ? `${m.owned_by} (${EXTENSION_LABEL})` : EXTENSION_LABEL;
+				const modelId = buildScopedModelId(model);
+				const fallbackName = model.configId ? `${model.id}::${model.configId}` : model.id;
+				const modelName = model.displayName || fallbackName;
+				const detail = `${detailLabel} (${EXTENSION_LABEL})`;
 
 				return {
 					id: modelId,
 					name: modelName,
 					detail,
 					tooltip: detail,
-					family: m.family ?? EXTENSION_LABEL,
+					family: model.family ?? EXTENSION_LABEL,
 					version: "1.0.0",
 					maxInputTokens: maxInput,
 					maxOutputTokens: maxOutput,
+					isUserSelectable: true,
+					isDefault: false,
+					category: { label: providerId, order: 0 },
 					capabilities: {
 						toolCalling: true,
-						imageInput: m.vision ?? false,
+						imageInput: model.vision ?? false,
 					},
 				} satisfies LanguageModelChatInformation;
 			});
 	}
-
-	// ── Token counting ──
 
 	async provideTokenCount(
 		_model: LanguageModelChatInformation,
 		text: string | LanguageModelChatRequestMessage,
 		_token: CancellationToken
 	): Promise<number> {
-		// Simple estimation — can be enhanced with actual tokenizer later
 		if (typeof text === "string") {
 			return Math.ceil(text.length / 4);
 		}
-		let total = 4; // base per message
+		let total = 4;
 		for (const part of text.content) {
 			if (part instanceof vscode.LanguageModelTextPart) {
 				total += Math.ceil(part.value.length / 4);
@@ -106,8 +133,6 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		}
 		return total;
 	}
-
-	// ── Chat response ──
 
 	async provideLanguageModelChatResponse(
 		model: LanguageModelChatInformation,
@@ -118,87 +143,87 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	): Promise<void> {
 		const safeProgress: Progress<LanguageModelResponsePart2> = {
 			report: (part) => {
-				try { progress.report(part); } catch (e) {
+				try {
+					progress.report(part);
+				} catch (e) {
 					console.error("[OmniChat] Progress.report failed", e);
 				}
 			},
 		};
 
 		try {
-			// 1. Find model config
-			const parsedId = parseModelId(model.id);
-			const um = this.findModelConfig(parsedId);
+			const parsedId = parseScopedModelId(model.id);
+			const resolvedModel = this.findModelConfig(parsedId);
+			if (!resolvedModel) {
+				throw new Error(`Model configuration not found for "${model.id}"`);
+			}
 
-			// 2. Apply delay
-			await this.applyDelay(um);
+			await this.applyDelay(resolvedModel);
 
-			// 3. Get API key
-			const useGenericKey = !um?.baseUrl;
-			const apiKey = await this._keyManager.ensureKey(um?.owned_by, useGenericKey);
+			const useGenericKey = !resolvedModel.baseUrl;
+			const apiKey = await this._keyManager.ensureKey(
+				parsedId.providerId || resolvedModel.owned_by,
+				useGenericKey
+			);
 			if (!apiKey) {
 				throw new Error("API key not found");
 			}
 
-			// 4. Resolve base URL
-			const baseUrl = um?.baseUrl || Config.getBaseUrl();
+			const baseUrl = resolvedModel.baseUrl || Config.getBaseUrl();
 			if (!baseUrl?.startsWith("http")) {
 				throw new Error("Invalid base URL");
 			}
 
-			// 5. Select adapter
-			const apiMode: ApiMode = um?.apiMode ?? "openai";
-			const adapter = this.createAdapter(apiMode);
-
-			// 6. Convert messages with system prompt interception
+			const apiMode: ApiMode = resolvedModel.apiMode ?? "openai";
 			const interceptedMessages = interceptSystemPrompt(
 				messages,
 				Config.getSystemPromptMode(),
 				Config.getSystemPromptContent()
 			);
-
 			const modelConfig = {
-				includeReasoningInRequest: um?.include_reasoning_in_request ?? false,
+				includeReasoningInRequest: resolvedModel.include_reasoning_in_request ?? false,
 			};
-			const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
-
-			// 7. Build request
-			const request = adapter.buildRequest(
-				um ?? { id: parsedId.baseId, owned_by: "" },
-				baseUrl,
-				apiKey,
-				convertedMessages,
-				options
-			);
-
-			// 8. Send with retry
 			const retryConfig = Config.getRetryConfig();
-			const response = await executeWithRetry(async () => {
-				const res = await fetch(request.url, {
+
+			await executeWithRetry(async () => {
+				const adapter = this.createAdapter(apiMode);
+				const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
+
+				const payload = adapter.buildRequest(
+					resolvedModel,
+					baseUrl,
+					apiKey,
+					convertedMessages,
+					options
+				);
+
+				const res = await fetch(payload.url, {
 					method: "POST",
-					headers: request.headers,
-					body: JSON.stringify(request.body),
+					headers: payload.headers,
+					body: JSON.stringify(payload.body),
 				});
+
 				if (!res.ok) {
 					const errorText = await res.text();
 					throw new Error(
-						`API error: [${res.status}] ${res.statusText}${errorText ? `\n${errorText}` : ""}\nURL: ${request.url}`
+						`API error: [${res.status}] ${res.statusText}${errorText ? `\n${errorText}` : ""}\nURL: ${payload.url}`
 					);
 				}
-				return res;
+
+				if (!res.body) {
+					throw new Error("No response body [EMPTY_RESPONSE]");
+				}
+
+				const result = await adapter.processStream(res.body, safeProgress, token);
+
+				if (retryConfig.retryEmptyResponse && !adapter.hasEmittedAnyContent) {
+					throw new Error("API stream ended without yielding any content [EMPTY_RESPONSE]");
+				}
+
+				if (result.responseId) {
+					safeProgress.report(createStatefulMarkerPart(model.id, result.responseId));
+				}
 			}, retryConfig);
-
-			if (!response.body) {
-				throw new Error("No response body");
-			}
-
-			// 9. Process stream
-			const result = await adapter.processStream(response.body, safeProgress, token);
-
-			// 10. Stateful marker (Responses API)
-			if (result.responseId) {
-				safeProgress.report(createStatefulMarkerPart(parsedId.baseId, result.responseId));
-			}
-
 		} catch (err) {
 			console.error("[OmniChat] Request failed", {
 				modelId: model.id,
@@ -210,22 +235,21 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		}
 	}
 
-	// ── Private helpers ──
+	private findModelConfig(parsedId: { providerId: string; baseId: string; configId?: string }): ModelItem | undefined {
+		const models = parsedId.providerId
+			? Config.getModelsForProvider(parsedId.providerId)
+			: Config.getModels();
 
-	private findModelConfig(parsedId: { baseId: string; configId?: string }): ModelItem | undefined {
-		const models = Config.getModels();
-
-		// Exact match (id + configId)
-		let found = models.find((m) =>
-			m.id === parsedId.baseId &&
-			((parsedId.configId && m.configId === parsedId.configId) ||
-				(!parsedId.configId && !m.configId))
+		let found = models.find((model) =>
+			model.id === parsedId.baseId &&
+			((parsedId.configId && model.configId === parsedId.configId) ||
+				(!parsedId.configId && !model.configId))
 		);
 
-		// Fallback: any model with same base ID
 		if (!found) {
-			found = models.find((m) => m.id === parsedId.baseId);
+			found = models.find((model) => model.id === parsedId.baseId);
 		}
+
 		return found;
 	}
 
@@ -260,7 +284,6 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	}
 
 	private getMaxOutputTokens(model: ModelItem): number | undefined {
-		// Each API has its own native parameter name
 		const apiMode = model.apiMode ?? "openai";
 		switch (apiMode) {
 			case "openai":
@@ -278,8 +301,6 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		}
 	}
 }
-
-// ── Stateful marker helpers ──
 
 function createStatefulMarkerPart(modelId: string, marker: string): vscode.LanguageModelDataPart {
 	const payload = `${modelId}\\${marker}`;

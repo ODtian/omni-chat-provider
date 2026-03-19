@@ -1,0 +1,13 @@
+.github/**
+.vscode/**
+node_modules/**
+src/**
+!src/vscode.proposed.chatProvider.d.ts
+!src/vscode.proposed.languageModelDataPart.d.ts
+!src/vscode.proposed.languageModelThinkingPart.d.ts
+out/**/*.map
+out/**/*.d.ts
+pnpm-lock.yaml
+tsconfig.json
+eslint.config.mjs
+*.vsix
