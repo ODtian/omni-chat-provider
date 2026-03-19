@@ -21,6 +21,10 @@ import { interceptSystemPrompt } from "./prompt/interceptor";
 // Adapters
 import { BaseAdapter } from "./adapters/base";
 import { OpenAIAdapter } from "./adapters/openai";
+import { OpenAIResponsesAdapter } from "./adapters/openaiResponses";
+import { AnthropicAdapter } from "./adapters/anthropic";
+import { GeminiAdapter } from "./adapters/gemini";
+import { OllamaAdapter } from "./adapters/ollama";
 
 const DEFAULT_CONTEXT_LENGTH = 128000;
 const DEFAULT_MAX_TOKENS = 4096;
@@ -241,17 +245,15 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		switch (apiMode) {
 			case "openai":
 				return new OpenAIAdapter();
-			// TODO: Add other adapters as they are implemented
-			// case "openai-responses":
-			// 	return new OpenAIResponsesAdapter();
-			// case "anthropic":
-			// 	return new AnthropicAdapter();
-			// case "gemini":
-			// 	return new GeminiAdapter();
-			// case "ollama":
-			// 	return new OllamaAdapter();
+			case "openai-responses":
+				return new OpenAIResponsesAdapter();
+			case "anthropic":
+				return new AnthropicAdapter();
+			case "gemini":
+				return new GeminiAdapter();
+			case "ollama":
+				return new OllamaAdapter();
 			default:
-				// Fallback to OpenAI-compatible for unknown modes
 				console.warn(`[OmniChat] Unknown apiMode "${apiMode}", falling back to OpenAI`);
 				return new OpenAIAdapter();
 		}
