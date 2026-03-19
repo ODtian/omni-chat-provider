@@ -6,6 +6,17 @@
 export type ApiMode = "openai" | "openai-responses" | "ollama" | "anthropic" | "gemini";
 
 /**
+ * A provider definition as configured by the user in `omnichat.providers`.
+ * Providers define connection-level settings shared by multiple models.
+ */
+export interface ProviderItem {
+	id: string;
+	baseUrl?: string;
+	apiMode?: ApiMode;
+	headers?: Record<string, string>;
+}
+
+/**
  * A model entry as configured by the user in `omnichat.models`.
  *
  * Common fields live at the top level; API-specific parameters

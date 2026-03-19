@@ -2,7 +2,7 @@
 // Type-safe configuration access
 // ──────────────────────────────────────────────────────────────
 import * as vscode from "vscode";
-import type { ModelItem, RetryConfig, SystemPromptMode } from "./types";
+import type { ModelItem, ProviderItem, RetryConfig, SystemPromptMode } from "./types";
 
 const SECTION = "omnichat";
 
@@ -10,12 +10,25 @@ const SECTION = "omnichat";
 export class Config {
 	// ── Models ──
 
+	static getProviders(): ProviderItem[] {
+		const raw = vscode.workspace.getConfiguration().get<unknown>(
+			`${SECTION}.providers`,
+			[]
+		);
+		const list = Array.isArray(raw) ? raw : [];
+		return list.filter(
+			(p): p is ProviderItem =>
+				!!p && typeof p === "object" && typeof (p as any).id === "string"
+		);
+	}
+
 	static getModels(): ModelItem[] {
 		const raw = vscode.workspace.getConfiguration().get<unknown>(
 			`${SECTION}.models`,
 			[]
 		);
-		return normalizeModels(raw);
+		const providers = Config.getProviders();
+		return normalizeModels(raw, providers);
 	}
 
 	// ── Connection ──
@@ -100,7 +113,12 @@ function getProviderId(obj: Record<string, unknown>): string {
 	);
 }
 
-function normalizeModels(raw: unknown): ModelItem[] {
+function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
+	const providerMap = new Map<string, ProviderItem>();
+	for (const p of providers) {
+		providerMap.set(p.id.toLowerCase(), p);
+	}
+
 	const list = Array.isArray(raw) ? raw : [];
 	const out: ModelItem[] = [];
 	for (const item of list) {
@@ -108,8 +126,31 @@ function normalizeModels(raw: unknown): ModelItem[] {
 			continue;
 		}
 		const obj = item as Record<string, unknown>;
-		const provider = getProviderId(obj);
-		out.push({ ...(obj as ModelItem), owned_by: provider });
+		const providerId = getProviderId(obj);
+		const providerDef = providerId ? providerMap.get(providerId.toLowerCase()) : undefined;
+
+		// Model fields override provider fields which override globals
+		const merged: ModelItem = {
+			...(obj as ModelItem),
+			owned_by: providerId,
+		};
+
+		if (providerDef) {
+			// Inherit baseUrl from provider if not set on model
+			if (!merged.baseUrl && providerDef.baseUrl) {
+				merged.baseUrl = providerDef.baseUrl;
+			}
+			// Inherit apiMode from provider if not set on model
+			if (!merged.apiMode && providerDef.apiMode) {
+				merged.apiMode = providerDef.apiMode;
+			}
+			// Merge headers: provider headers as base, model headers override
+			if (providerDef.headers) {
+				merged.headers = { ...providerDef.headers, ...merged.headers };
+			}
+		}
+
+		out.push(merged);
 	}
 	return out;
 }

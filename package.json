@@ -85,7 +85,36 @@
 				"omnichat.baseUrl": {
 					"type": "string",
 					"default": "https://api.openai.com/v1",
-					"markdownDescription": "Default base URL for API endpoints. Individual models can override this via their own `baseUrl`."
+					"markdownDescription": "Default base URL for API endpoints. Overridden by provider-level or model-level `baseUrl`."
+				},
+				"omnichat.providers": {
+					"type": "array",
+					"default": [],
+					"markdownDescription": "Provider definitions. Each provider has its own `baseUrl`, `apiMode`, and API key.\n\nModels reference providers via `provider`/`owned_by` and inherit `baseUrl`, `apiMode`, `headers`.",
+					"items": {
+						"type": "object",
+						"required": ["id"],
+						"properties": {
+							"id": {
+								"type": "string",
+								"description": "Unique provider ID (e.g. 'openai', 'relay', 'local-ollama')."
+							},
+							"baseUrl": {
+								"type": "string",
+								"description": "API base URL for this provider."
+							},
+							"apiMode": {
+								"type": "string",
+								"enum": ["openai", "openai-responses", "ollama", "anthropic", "gemini"],
+								"description": "Default API mode for models under this provider."
+							},
+							"headers": {
+								"type": "object",
+								"additionalProperties": { "type": "string" },
+								"description": "Custom HTTP headers for all requests to this provider."
+							}
+						}
+					}
 				},
 				"omnichat.models": {
 					"type": "array",
