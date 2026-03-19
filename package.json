@@ -1,6 +1,6 @@
 {
 	"name": "omni-chat-provider",
-	"publisher": "johnny-zhao",
+	"publisher": "ODtian",
 	"displayName": "Omni Chat Provider",
 	"description": "A universal language model chat provider for VS Code — supports OpenAI, Anthropic, Gemini, Ollama and any OAI-compatible endpoint.",
 	"keywords": [
