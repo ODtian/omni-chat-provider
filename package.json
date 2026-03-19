@@ -1,0 +1,468 @@
+{
+	"name": "omni-chat-provider",
+	"publisher": "johnny-zhao",
+	"displayName": "Omni Chat Provider",
+	"description": "A universal language model chat provider for VS Code — supports OpenAI, Anthropic, Gemini, Ollama and any OAI-compatible endpoint.",
+	"icon": "assets/logo.png",
+	"keywords": [
+		"ai", "chat", "copilot", "language-model", "llm",
+		"openai", "anthropic", "gemini", "ollama",
+		"openai-compatible", "chat-provider"
+	],
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/ODtian/omni-chat-provider"
+	},
+	"version": "0.1.0",
+	"engines": {
+		"vscode": "^1.104.0"
+	},
+	"extensionDependencies": [
+		"github.copilot-chat"
+	],
+	"categories": ["AI", "Chat"],
+	"license": "MIT",
+	"enabledApiProposals": ["chatProvider"],
+	"contributes": {
+		"languageModelChatProviders": [
+			{
+				"vendor": "omnichat",
+				"displayName": "Omni Chat",
+				"managementCommand": "omnichat.setApiKey"
+			}
+		],
+		"commands": [
+			{
+				"command": "omnichat.setApiKey",
+				"category": "OmniChat",
+				"title": "Set API Key (Global)"
+			},
+			{
+				"command": "omnichat.setProviderApiKey",
+				"category": "OmniChat",
+				"title": "Set API Key (Per Provider)"
+			},
+			{
+				"command": "omnichat.generateCommitMessage",
+				"title": "Generate Commit Message",
+				"category": "OmniChat",
+				"icon": "$(wand)"
+			},
+			{
+				"command": "omnichat.abortCommitMessage",
+				"title": "Stop Generating Commit Message",
+				"category": "OmniChat",
+				"icon": "$(debug-stop)"
+			}
+		],
+		"menus": {
+			"scm/title": [
+				{
+					"command": "omnichat.generateCommitMessage",
+					"group": "navigation",
+					"when": "config.git.enabled && scmProvider == git && !omnichat.isGeneratingCommit"
+				},
+				{
+					"command": "omnichat.abortCommitMessage",
+					"group": "navigation",
+					"when": "config.git.enabled && scmProvider == git && omnichat.isGeneratingCommit"
+				}
+			],
+			"commandPalette": [
+				{
+					"command": "omnichat.generateCommitMessage",
+					"when": "config.git.enabled && !omnichat.isGeneratingCommit"
+				},
+				{
+					"command": "omnichat.abortCommitMessage",
+					"when": "config.git.enabled && omnichat.isGeneratingCommit"
+				}
+			]
+		},
+		"configuration": {
+			"title": "Omni Chat Provider",
+			"properties": {
+				"omnichat.baseUrl": {
+					"type": "string",
+					"default": "https://api.openai.com/v1",
+					"markdownDescription": "Default base URL for API endpoints. Individual models can override this via their own `baseUrl`."
+				},
+				"omnichat.models": {
+					"type": "array",
+					"default": [],
+					"markdownDescription": "Model configurations. Each entry defines a model with its API endpoint and parameters.\n\nAutocompletion for API-specific parameters is provided based on the `apiMode` value.",
+					"items": {
+						"type": "object",
+						"required": ["id"],
+						"properties": {
+							"id": {
+								"type": "string",
+								"description": "Model ID (e.g. 'gpt-4o', 'claude-sonnet-4-20250514', 'gemini-2.5-pro')."
+							},
+							"apiMode": {
+								"type": "string",
+								"enum": ["openai", "openai-responses", "ollama", "anthropic", "gemini"],
+								"default": "openai",
+								"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+							},
+							"owned_by": {
+								"type": "string",
+								"description": "Provider identifier (e.g. 'openai', 'anthropic'). Used for per-provider API key lookup."
+							},
+							"provider": {
+								"type": "string",
+								"description": "(Alias of owned_by) Provider identifier."
+							},
+							"configId": {
+								"type": "string",
+								"description": "Optional config ID to create multiple configurations for the same model (e.g. 'thinking', 'fast')."
+							},
+							"displayName": {
+								"type": "string",
+								"description": "Display name shown in the model picker. Auto-generated if omitted."
+							},
+							"baseUrl": {
+								"type": "string",
+								"description": "Override the global base URL for this model."
+							},
+							"family": {
+								"type": "string",
+								"description": "Model family hint (e.g. 'gpt-4o', 'claude-3'). Enables family-specific optimizations."
+							},
+							"context_length": {
+								"type": "number",
+								"default": 128000,
+								"minimum": 1000,
+								"description": "Total context window size in tokens."
+							},
+							"vision": {
+								"type": "boolean",
+								"default": false,
+								"description": "Whether the model supports image input."
+							},
+							"temperature": {
+								"type": "number",
+								"minimum": 0,
+								"maximum": 2,
+								"description": "Sampling temperature. Lower = more deterministic."
+							},
+							"top_p": {
+								"type": "number",
+								"minimum": 0,
+								"maximum": 1,
+								"description": "Top-p (nucleus) sampling."
+							},
+							"extra": {
+								"type": "object",
+								"description": "Extra request body parameters passed directly to the API."
+							},
+							"headers": {
+								"type": "object",
+								"additionalProperties": { "type": "string" },
+								"description": "Custom HTTP headers merged with defaults."
+							},
+							"delay": {
+								"type": "number",
+								"default": 0,
+								"minimum": 0,
+								"description": "Per-model delay (ms) between consecutive requests."
+							},
+							"useForCommitGeneration": {
+								"type": "boolean",
+								"default": false,
+								"description": "Use this model for Git commit message generation."
+							},
+							"include_reasoning_in_request": {
+								"type": "boolean",
+								"default": false,
+								"description": "Include reasoning_content in assistant messages sent to the API."
+							}
+						},
+						"anyOf": [
+							{ "required": ["owned_by"] },
+							{ "required": ["provider"] }
+						],
+						"allOf": [
+							{
+								"if": {
+									"properties": { "apiMode": { "const": "openai" } }
+								},
+								"then": {
+									"properties": {
+										"max_tokens": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[OpenAI] Maximum tokens to generate."
+										},
+										"max_completion_tokens": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[OpenAI] Max completion tokens (new standard parameter)."
+										},
+										"reasoning_effort": {
+											"type": "string",
+											"enum": ["high", "medium", "low"],
+											"description": "[OpenAI] Reasoning effort level for o-series models."
+										},
+										"frequency_penalty": {
+											"type": "number",
+											"minimum": -2,
+											"maximum": 2,
+											"description": "[OpenAI] Frequency penalty."
+										},
+										"presence_penalty": {
+											"type": "number",
+											"minimum": -2,
+											"maximum": 2,
+											"description": "[OpenAI] Presence penalty."
+										}
+									}
+								}
+							},
+							{
+								"if": {
+									"properties": { "apiMode": { "const": "openai-responses" } }
+								},
+								"then": {
+									"properties": {
+										"max_output_tokens": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Responses] Maximum output tokens."
+										},
+										"reasoning": {
+											"type": "object",
+											"description": "[Responses] Reasoning configuration.",
+											"properties": {
+												"effort": {
+													"type": "string",
+													"enum": ["high", "medium", "low"],
+													"description": "Reasoning effort level."
+												},
+												"max_tokens": {
+													"type": "number",
+													"minimum": 1,
+													"description": "Max reasoning tokens."
+												}
+											}
+										}
+									}
+								}
+							},
+							{
+								"if": {
+									"properties": { "apiMode": { "const": "anthropic" } }
+								},
+								"then": {
+									"properties": {
+										"max_tokens": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Anthropic] Maximum tokens to generate."
+										},
+										"thinking": {
+											"type": "object",
+											"description": "[Anthropic] Extended thinking configuration.",
+											"properties": {
+												"type": {
+													"type": "string",
+													"enum": ["enabled", "disabled"],
+													"description": "Enable or disable extended thinking."
+												},
+												"budget_tokens": {
+													"type": "number",
+													"minimum": 1024,
+													"description": "Maximum thinking tokens budget."
+												}
+											}
+										},
+										"top_k": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Anthropic] Top-K sampling."
+										}
+									}
+								}
+							},
+							{
+								"if": {
+									"properties": { "apiMode": { "const": "gemini" } }
+								},
+								"then": {
+									"properties": {
+										"maxOutputTokens": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Gemini] Maximum output tokens."
+										},
+										"topK": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Gemini] Top-K sampling."
+										},
+										"topP": {
+											"type": "number",
+											"minimum": 0,
+											"maximum": 1,
+											"description": "[Gemini] Top-P sampling."
+										},
+										"thinkingConfig": {
+											"type": "object",
+											"description": "[Gemini] Thinking configuration.",
+											"properties": {
+												"thinkingBudget": {
+													"type": "number",
+													"description": "Maximum thinking tokens."
+												}
+											}
+										}
+									}
+								}
+							},
+							{
+								"if": {
+									"properties": { "apiMode": { "const": "ollama" } }
+								},
+								"then": {
+									"properties": {
+										"num_predict": {
+											"type": "number",
+											"minimum": -1,
+											"description": "[Ollama] Maximum tokens to predict. -1 for infinite."
+										},
+										"num_ctx": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Ollama] Context window size."
+										},
+										"num_gpu": {
+											"type": "number",
+											"minimum": 0,
+											"description": "[Ollama] Number of GPU layers."
+										},
+										"top_k": {
+											"type": "number",
+											"minimum": 1,
+											"description": "[Ollama] Top-K sampling."
+										},
+										"min_p": {
+											"type": "number",
+											"minimum": 0,
+											"maximum": 1,
+											"description": "[Ollama] Minimum probability threshold."
+										},
+										"repeat_penalty": {
+											"type": "number",
+											"description": "[Ollama] Repetition penalty."
+										}
+									}
+								}
+							}
+						]
+					}
+				},
+				"omnichat.retry": {
+					"type": "object",
+					"default": {
+						"enabled": true,
+						"maxAttempts": 3,
+						"intervalMs": 1000,
+						"statusCodes": []
+					},
+					"properties": {
+						"enabled": {
+							"type": "boolean",
+							"default": true,
+							"description": "Enable automatic retry on transient errors."
+						},
+						"maxAttempts": {
+							"type": "number",
+							"default": 3,
+							"minimum": 1,
+							"description": "Maximum retry attempts."
+						},
+						"intervalMs": {
+							"type": "number",
+							"default": 1000,
+							"minimum": 1,
+							"description": "Delay between retries in milliseconds."
+						},
+						"statusCodes": {
+							"type": "array",
+							"items": { "type": "number" },
+							"description": "Additional HTTP status codes to retry on (merged with defaults: 429, 500, 502, 503, 504)."
+						}
+					},
+					"description": "Retry configuration for transient API errors."
+				},
+				"omnichat.delay": {
+					"type": "number",
+					"default": 0,
+					"minimum": 0,
+					"description": "Global delay (ms) between consecutive requests. Per-model `delay` overrides this."
+				},
+				"omnichat.systemPrompt.mode": {
+					"type": "string",
+					"enum": ["passthrough", "replace", "append", "disable"],
+					"default": "passthrough",
+					"markdownDescription": "How to handle the system prompt from Copilot Chat:\n- `passthrough` — Send as-is\n- `replace` — Replace with custom content\n- `append` — Append custom content\n- `disable` — Remove system prompt entirely"
+				},
+				"omnichat.systemPrompt.content": {
+					"type": "string",
+					"default": "",
+					"markdownDescription": "Custom system prompt content. Used when `systemPrompt.mode` is `replace` or `append`."
+				},
+				"omnichat.readFileLines": {
+					"type": "number",
+					"default": 0,
+					"minimum": 0,
+					"maximum": 10000,
+					"description": "Default line count for read_file tool calls. 0 = let model decide."
+				},
+				"omnichat.commitLanguage": {
+					"type": "string",
+					"default": "English",
+					"enum": [
+						"English", "French", "Italian", "German", "Spanish", "Russian",
+						"Chinese (Simplified)", "Chinese (Traditional)", "Japanese", "Korean",
+						"Czech", "Portuguese (Brazil)", "Turkish", "Polish"
+					],
+					"description": "Language for generated Git commit messages."
+				},
+				"omnichat.commitMessagePrompt": {
+					"type": "string",
+					"default": "",
+					"description": "Custom system prompt for commit message generation."
+				}
+			}
+		}
+	},
+	"main": "./out/extension.js",
+	"scripts": {
+		"vscode:prepublish": "npm run compile",
+		"download-api": "dts dev && mv vscode.proposed.*.ts src",
+		"compile": "tsc -p ./",
+		"lint": "eslint",
+		"format": "prettier --write .",
+		"watch": "tsc -watch -p ./",
+		"test": "npm run compile && vscode-test",
+		"build": "npx @vscode/vsce package -o extension.vsix"
+	},
+	"dependencies": {
+		"@microsoft/tiktokenizer": "^1.0.10"
+	},
+	"devDependencies": {
+		"@eslint/js": "^9.13.0",
+		"@stylistic/eslint-plugin": "^2.9.0",
+		"@types/node": "^22",
+		"@types/mocha": "^10.0.6",
+		"@vscode/dts": "^0.4.1",
+		"@types/vscode": "^1.104.0",
+		"@vscode/test-cli": "^0.0.11",
+		"@vscode/test-electron": "^2.5.2",
+		"eslint": "^9.13.0",
+		"prettier": "^3.1.0",
+		"typescript": "^5.9.2",
+		"typescript-eslint": "^8.39.0"
+	}
+}
