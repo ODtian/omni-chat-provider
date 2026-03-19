@@ -16,9 +16,6 @@
 	"engines": {
 		"vscode": "^1.104.0"
 	},
-	"extensionDependencies": [
-		"github.copilot-chat"
-	],
 	"categories": ["AI", "Chat"],
 	"license": "MIT",
 	"enabledApiProposals": ["chatProvider"],
