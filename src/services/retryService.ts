@@ -1,7 +1,7 @@
 // ──────────────────────────────────────────────────────────────
 // Retry service
 // ──────────────────────────────────────────────────────────────
-import type { RetryConfig } from "../types";
+import type { RetryAttemptInfo, RetryConfig } from "../types";
 
 const DEFAULT_RETRYABLE_CODES = [429, 500, 502, 503, 504];
 
@@ -15,7 +15,8 @@ const NETWORK_ERROR_PATTERNS = [
  */
 export async function executeWithRetry<T>(
 	fn: () => Promise<T>,
-	config: Required<RetryConfig>
+	config: Required<RetryConfig>,
+	onRetry?: (info: RetryAttemptInfo) => void | Promise<void>
 ): Promise<T> {
 	if (!config.enabled) {
 		return await fn();
@@ -52,6 +53,15 @@ export async function executeWithRetry<T>(
 			);
 			const isTimeout = lastError?.message.includes("[TIMEOUT]");
 			const isEmptyResponse = lastError?.message.includes("[EMPTY_RESPONSE]");
+			const reason: RetryAttemptInfo["reason"] = isTimeout
+				? "timeout"
+				: isEmptyResponse
+					? "empty-response"
+					: isRetryableStatus
+						? "http-status"
+						: isRetryableNetwork
+							? "network"
+							: "other";
 
 			if (
 				(!isRetryableStatus && !isRetryableNetwork && !isTimeout && !isEmptyResponse) ||
@@ -64,6 +74,15 @@ export async function executeWithRetry<T>(
 				`[OmniChat] Retrying in ${config.intervalMs}ms (attempt ${attempt + 1}/${config.maxAttempts}):`,
 				lastError.message
 			);
+			const nextRetryAt = new Date(Date.now() + config.intervalMs);
+			await onRetry?.({
+				attemptNumber: attempt + 1,
+				maxAttempts: config.maxAttempts,
+				intervalMs: config.intervalMs,
+				error: lastError,
+				nextRetryAt,
+				reason,
+			});
 			await new Promise<void>((resolve) => setTimeout(resolve, config.intervalMs));
 		}
 	}

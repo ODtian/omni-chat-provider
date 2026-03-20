@@ -25,7 +25,8 @@ import { OllamaAdapter } from "./adapters/ollama";
 const DEFAULT_CONTEXT_LENGTH = 128000;
 const DEFAULT_MAX_TOKENS = 4096;
 const EXTENSION_LABEL = "OmniChat";
-const STATEFUL_MARKER_MIME = "application/vnd.omnichat.stateful-marker";
+const OUTPUT_CHANNEL = vscode.window.createOutputChannel("OmniChat");
+const MAX_VISIBLE_ERROR_LENGTH = 220;
 
 interface ProviderGroupConfiguration {
 	providerId?: string;
@@ -185,6 +186,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			};
 			const retryConfig = Config.getRetryConfig();
 
+			let retryNoticeCount = 0;
 			await executeWithRetry(async () => {
 				const adapter = this.createAdapter(apiMode);
 				const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
@@ -220,16 +222,45 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					throw new Error("API stream ended without yielding any content [EMPTY_RESPONSE]");
 				}
 
-				if (result.responseId) {
-					safeProgress.report(createStatefulMarkerPart(model.id, result.responseId));
+				// Responses API exposes a response ID, but our DataPart experiments
+				// showed that custom response parts are not fed back into subsequent
+				// provider requests by VS Code/Copilot today. Keep the ID available
+				// for future stateful implementations instead of emitting marker data.
+				void result.responseId;
+			}, retryConfig, async (info) => {
+				if (token.isCancellationRequested) {
+					return;
 				}
-			}, retryConfig);
+				retryNoticeCount += 1;
+				const nextTimeText = info.nextRetryAt.toLocaleTimeString("zh-CN", {
+					hour12: false,
+					hour: "2-digit",
+					minute: "2-digit",
+					second: "2-digit",
+				});
+				const body = info.reason === "empty-response"
+					? `Empty response. Retry ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`
+					: `Retry ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+
+				const thinkingId = `retry_notice_${Date.now()}_${retryNoticeCount}_${Math.random().toString(36).slice(2, 6)}`;
+				safeProgress.report(new vscode.LanguageModelThinkingPart(body, thinkingId, {
+					type: "retry_notice",
+					attemptNumber: info.attemptNumber,
+					reason: info.reason,
+					nextRetryAt: info.nextRetryAt.toISOString(),
+				}));
+				safeProgress.report(new vscode.LanguageModelThinkingPart("", thinkingId));
+			});
 		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] Request failed for ${model.id}`);
+			OUTPUT_CHANNEL.appendLine(message);
+			OUTPUT_CHANNEL.appendLine("");
 			console.error("[OmniChat] Request failed", {
 				modelId: model.id,
-				error: err instanceof Error ? err.message : String(err),
+				error: message,
 			});
-			throw err;
+			throw new Error(truncateErrorForUser(message));
 		} finally {
 			this._lastRequestTime = Date.now();
 		}
@@ -302,8 +333,10 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	}
 }
 
-function createStatefulMarkerPart(modelId: string, marker: string): vscode.LanguageModelDataPart {
-	const payload = `${modelId}\\${marker}`;
-	const bytes = new TextEncoder().encode(payload);
-	return new vscode.LanguageModelDataPart(bytes, STATEFUL_MARKER_MIME);
+function truncateErrorForUser(message: string): string {
+	const singleLine = message.replace(/\s+/g, " ").trim();
+	if (singleLine.length <= MAX_VISIBLE_ERROR_LENGTH) {
+		return singleLine;
+	}
+	return `${singleLine.slice(0, MAX_VISIBLE_ERROR_LENGTH)}… See OmniChat output for details.`;
 }

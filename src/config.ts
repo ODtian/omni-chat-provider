@@ -17,22 +17,27 @@ export class Config {
 	// ── Models ──
 
 	static getProviders(): ProviderItem[] {
-		const raw = vscode.workspace.getConfiguration().get<unknown>(
-			`${SECTION}.providers`,
-			[]
+		const raw = getMergedArraySetting(`${SECTION}.providers`);
+		const providers = raw.filter(
+			(item): item is ProviderItem =>
+				!!item && typeof item === "object" && typeof (item as any).id === "string"
 		);
-		const list = Array.isArray(raw) ? raw : [];
-		return list.filter(
-			(p): p is ProviderItem =>
-				!!p && typeof p === "object" && typeof (p as any).id === "string"
-		);
+		const merged = new Map<string, ProviderItem>();
+		for (const provider of providers) {
+			const normalizedId = normalizeProviderId(provider.id);
+			if (!normalizedId) {
+				continue;
+			}
+			merged.set(normalizedId, {
+				...provider,
+				id: normalizedId,
+			});
+		}
+		return [...merged.values()];
 	}
 
 	static getModels(): ModelItem[] {
-		const raw = vscode.workspace.getConfiguration().get<unknown>(
-			`${SECTION}.models`,
-			[]
-		);
+		const raw = getMergedArraySetting(`${SECTION}.models`);
 		const providers = Config.getProviders();
 		return normalizeModels(raw, providers);
 	}
@@ -158,6 +163,36 @@ function normalizeProviderId(value: string | undefined): string {
 	return value?.trim().toLowerCase() ?? "";
 }
 
+function getMergedArraySetting(settingKey: string): unknown[] {
+	const configuration = vscode.workspace.getConfiguration();
+	const inspected = configuration.inspect<unknown>(settingKey);
+	if (!inspected) {
+		return [];
+	}
+
+	const workspaceFolderUri = vscode.workspace.workspaceFolders?.length === 1
+		? vscode.workspace.workspaceFolders[0].uri
+		: undefined;
+	const folderInspection = workspaceFolderUri
+		? vscode.workspace.getConfiguration(undefined, workspaceFolderUri).inspect<unknown>(settingKey)
+		: undefined;
+
+	const sources = [
+		inspected.globalValue,
+		inspected.workspaceValue,
+		folderInspection?.workspaceFolderValue,
+	];
+
+	const merged: unknown[] = [];
+	for (const source of sources) {
+		if (Array.isArray(source)) {
+			merged.push(...source);
+		}
+	}
+
+	return merged;
+}
+
 function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 	const providerMap = new Map<string, ProviderItem>();
 	for (const p of providers) {
@@ -165,7 +200,7 @@ function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 	}
 
 	const list = Array.isArray(raw) ? raw : [];
-	const out: ModelItem[] = [];
+	const out = new Map<string, ModelItem>();
 	for (const item of list) {
 		if (!item || typeof item !== "object") {
 			continue;
@@ -195,9 +230,14 @@ function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 			}
 		}
 
-		out.push(merged);
+		const dedupeKey = [
+			normalizeProviderId(merged.owned_by),
+			merged.id.trim(),
+			typeof merged.configId === "string" ? merged.configId.trim() : "",
+		].join("::");
+		out.set(dedupeKey, merged);
 	}
-	return out;
+	return [...out.values()];
 }
 
 function encodeModelSegment(value: string): string {

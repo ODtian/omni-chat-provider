@@ -70,6 +70,15 @@ export interface RetryConfig {
 	timeoutMs?: number;
 }
 
+export interface RetryAttemptInfo {
+	attemptNumber: number;
+	maxAttempts: number;
+	intervalMs: number;
+	error: Error;
+	nextRetryAt: Date;
+	reason: "timeout" | "empty-response" | "http-status" | "network" | "other";
+}
+
 /** System prompt interception mode. */
 export type SystemPromptMode = "passthrough" | "replace" | "append" | "disable";
 

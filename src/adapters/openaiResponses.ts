@@ -102,7 +102,11 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 						callId: (part as { callId?: string }).callId ?? "",
 						content: collectToolResultText(part as { content?: ReadonlyArray<unknown> }),
 					});
-				} else if (part instanceof vscode.LanguageModelThinkingPart && modelConfig.includeReasoningInRequest) {
+				} else if (
+					part instanceof vscode.LanguageModelThinkingPart &&
+					modelConfig.includeReasoningInRequest &&
+					(part.metadata as { type?: string } | undefined)?.type !== "retry_notice"
+				) {
 					thinkingParts.push(Array.isArray(part.value) ? part.value.join("") : part.value);
 				}
 			}

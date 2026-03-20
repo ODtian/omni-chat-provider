@@ -37,7 +37,7 @@ Deleting a Copilot group does not delete OmniChat settings or OmniChat secrets.
 
 ### 1. Install the extension
 
-Install the VSIX or install from Open VSX after publishing.
+Install the extension from VS Code Marketplace, install the VSIX manually, or install from Open VSX after publishing.
 
 ### 2. Define providers
 
@@ -248,55 +248,89 @@ Modes:
 Install dependencies:
 
 ```bash
-pnpm ci
+npm install
 ```
 
 Compile:
 
 ```bash
-pnpm run compile
+npm run compile
 ```
 
 Package VSIX:
 
 ```bash
-pnpm run package
+npm run package
 ```
 
 ## GitHub Actions
 
-The repository includes `.github/workflows/openvsx.yml`.
+The repository includes:
 
-It does two jobs:
+- `.github/workflows/marketplace.yml`
+- `.github/workflows/openvsx.yml`
+
+Marketplace workflow:
+
+- Build and package `extension.vsix`
+- Publish that VSIX to VS Code Marketplace using `MARKETPLACE_TOKEN`
+
+Open VSX workflow:
 
 - Build and package `extension.vsix`
 - Publish that VSIX to Open VSX using `OPENVSX_TOKEN`
 
-### Required secret
+### Required secrets
 
-Set this repository secret before publishing:
+Set these repository secrets before publishing:
 
+- `MARKETPLACE_TOKEN`
 - `OPENVSX_TOKEN`
+
+If you only use one marketplace, only that secret is required for that workflow.
 
 ### Triggering publish
 
-Publishing runs on:
+Both publishing workflows run on:
 
 - Manual workflow dispatch
 - Git tag pushes matching `v*`
+
+## VS Code Marketplace Publishing
+
+This extension uses the proposed `chatProvider` API, so Marketplace publishing must explicitly allow it.
+
+Local publish:
+
+```bash
+npm run package
+npm run publish:marketplace -- --pat <MARKETPLACE_TOKEN>
+```
+
+This uses:
+
+- `npx @vscode/vsce package`
+- `npx @vscode/vsce publish --allow-proposed-apis chatProvider --packagePath extension.vsix`
+
+Before publishing:
+
+1. Create a publisher in Visual Studio Marketplace
+2. Make sure `package.json.publisher` matches that publisher exactly
+3. Create a PAT for Marketplace publishing
+4. Save it as the GitHub secret `MARKETPLACE_TOKEN`
 
 ## Open VSX Publishing
 
 Local publish:
 
 ```bash
-pnpm run package
-pnpm run publish:openvsx
+npm run package
+npm run publish:openvsx
 ```
 
 This uses:
 
-- `pnpx @vscode/vsce package`
-- `pnpx ovsx publish --packagePath extension.vsix`
+- `npx @vscode/vsce package`
+- `npx ovsx publish --packagePath extension.vsix`
 
 You still need a valid Open VSX token in your environment as `OVSX_PAT`.

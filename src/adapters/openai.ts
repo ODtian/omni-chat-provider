@@ -56,7 +56,11 @@ export class OpenAIAdapter extends BaseAdapter {
 					const callId = (part as { callId?: string }).callId ?? "";
 					const content = collectToolResultText(part as { content?: ReadonlyArray<unknown> });
 					toolResults.push({ callId, content });
-				} else if (part instanceof vscode.LanguageModelThinkingPart && modelConfig.includeReasoningInRequest) {
+				} else if (
+					part instanceof vscode.LanguageModelThinkingPart &&
+					modelConfig.includeReasoningInRequest &&
+					(part.metadata as { type?: string } | undefined)?.type !== "retry_notice"
+				) {
 					const content = Array.isArray(part.value) ? part.value.join("") : part.value;
 					thinkingParts.push(content);
 				}

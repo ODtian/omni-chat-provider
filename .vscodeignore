@@ -5,8 +5,10 @@ src/**
 !src/vscode.proposed.chatProvider.d.ts
 !src/vscode.proposed.languageModelDataPart.d.ts
 !src/vscode.proposed.languageModelThinkingPart.d.ts
+out/**
 out/**/*.map
 out/**/*.d.ts
+!out/extension.js
 pnpm-lock.yaml
 tsconfig.json
 eslint.config.mjs

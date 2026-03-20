@@ -509,16 +509,18 @@
 	},
 	"main": "./out/extension.js",
 	"scripts": {
-		"vscode:prepublish": "npm run compile",
+		"vscode:prepublish": "pnpm run bundle",
 		"download-api": "dts dev && mv vscode.proposed.*.ts src",
 		"compile": "tsc -p ./",
+		"bundle": "pnpm exec esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",
 		"lint": "eslint",
 		"format": "prettier --write .",
 		"watch": "tsc -watch -p ./",
-		"test": "npm run compile && vscode-test",
-		"build": "npm run package",
-		"package": "npx @vscode/vsce package -o extension.vsix",
-		"publish:openvsx": "npx ovsx publish --packagePath extension.vsix"
+		"test": "pnpm run compile && vscode-test",
+		"build": "pnpm run package",
+		"package": "pnpm exec vsce package --no-dependencies -o extension.vsix",
+		"publish:marketplace": "pnpm exec vsce publish --no-dependencies --allow-proposed-apis chatProvider --packagePath extension.vsix",
+		"publish:openvsx": "pnpm exec ovsx publish --packagePath extension.vsix"
 	},
 	"dependencies": {
 		"@microsoft/tiktokenizer": "^1.0.10"
@@ -529,10 +531,13 @@
 		"@types/node": "^22",
 		"@types/mocha": "^10.0.6",
 		"@vscode/dts": "^0.4.1",
+		"@vscode/vsce": "^3.6.2",
 		"@types/vscode": "^1.104.0",
 		"@vscode/test-cli": "^0.0.11",
 		"@vscode/test-electron": "^2.5.2",
+		"esbuild": "^0.25.9",
 		"eslint": "^9.13.0",
+		"ovsx": "^0.10.4",
 		"prettier": "^3.1.0",
 		"typescript": "^5.9.2",
 		"typescript-eslint": "^8.39.0"
