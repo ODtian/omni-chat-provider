@@ -1,4 +1,4 @@
-name: Build and Publish
+name: Build and Publish to Marketplace
 
 on:
   workflow_dispatch:
@@ -36,7 +36,7 @@ jobs:
           name: extension-vsix
           path: extension.vsix
 
-  publish-openvsx:
+  publish-marketplace:
     needs: package
     runs-on: ubuntu-latest
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
@@ -60,7 +60,7 @@ jobs:
         with:
           name: extension-vsix
 
-      - name: Publish to Open VSX
+      - name: Publish to VS Code Marketplace
         env:
-          OVSX_PAT: ${{ secrets.OPENVSX_TOKEN }}
-        run: pnpm run publish:openvsx
+          VSCE_PAT: ${{ secrets.MARKETPLACE_TOKEN }}
+        run: pnpm run publish:marketplace -- --pat "$VSCE_PAT"
