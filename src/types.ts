@@ -66,6 +66,8 @@ export interface RetryConfig {
 	maxAttempts?: number;
 	intervalMs?: number;
 	statusCodes?: number[];
+	retryRequestErrors?: boolean;
+	retryNetworkErrors?: boolean;
 	retryEmptyResponse?: boolean;
 	timeoutMs?: number;
 }

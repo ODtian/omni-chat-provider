@@ -187,8 +187,10 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			const retryConfig = Config.getRetryConfig();
 
 			let retryNoticeCount = 0;
+			let activeAdapter: BaseAdapter | undefined;
 			await executeWithRetry(async () => {
 				const adapter = this.createAdapter(apiMode);
+				activeAdapter = adapter;
 				const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
 
 				const payload = adapter.buildRequest(
@@ -238,9 +240,16 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					minute: "2-digit",
 					second: "2-digit",
 				});
-				const body = info.reason === "empty-response"
-					? `Empty response. Retry ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`
-					: `Retry ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+				const reasonLabel = info.reason === "empty-response"
+					? "Empty response"
+					: info.reason === "network"
+						? "Network/stream error"
+						: info.reason === "http-status"
+							? "Retryable request error"
+							: info.reason === "timeout"
+								? "Request timeout"
+								: "Request error";
+				const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
 
 				const thinkingId = `retry_notice_${Date.now()}_${retryNoticeCount}_${Math.random().toString(36).slice(2, 6)}`;
 				safeProgress.report(new vscode.LanguageModelThinkingPart(body, thinkingId, {
@@ -250,6 +259,17 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					nextRetryAt: info.nextRetryAt.toISOString(),
 				}));
 				safeProgress.report(new vscode.LanguageModelThinkingPart("", thinkingId));
+			}, () => {
+				if (token.isCancellationRequested) {
+					return false;
+				}
+
+				if (activeAdapter?.hasEmittedAnyContent) {
+					console.warn("[OmniChat] Skip retry because partial content has already been emitted.");
+					return false;
+				}
+
+				return undefined;
 			});
 		} catch (err) {
 			const message = err instanceof Error ? err.message : String(err);

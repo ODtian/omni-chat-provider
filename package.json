@@ -403,7 +403,11 @@
 						"enabled": true,
 						"maxAttempts": 3,
 						"intervalMs": 1000,
-						"statusCodes": []
+						"statusCodes": [],
+						"retryRequestErrors": true,
+						"retryNetworkErrors": true,
+						"retryEmptyResponse": true,
+						"timeoutMs": 120000
 					},
 					"properties": {
 						"enabled": {
@@ -427,6 +431,27 @@
 							"type": "array",
 							"items": { "type": "number" },
 							"description": "Additional HTTP status codes to retry on (merged with defaults: 429, 500, 502, 503, 504)."
+						},
+						"retryRequestErrors": {
+							"type": "boolean",
+							"default": true,
+							"description": "Retry request errors such as retryable HTTP status codes (429/5xx) and per-attempt timeouts."
+						},
+						"retryNetworkErrors": {
+							"type": "boolean",
+							"default": true,
+							"description": "Retry network or stream interruption errors such as terminated, aborted, ECONNRESET, or socket hang up."
+						},
+						"retryEmptyResponse": {
+							"type": "boolean",
+							"default": true,
+							"description": "Retry when the request succeeds but the response stream finishes without yielding any content."
+						},
+						"timeoutMs": {
+							"type": "number",
+							"default": 120000,
+							"minimum": 0,
+							"description": "Timeout (ms) for each request attempt. 0 means no timeout."
 						}
 					},
 					"description": "Retry configuration for transient API errors."
@@ -460,6 +485,16 @@
 					"default": [429, 500, 502, 503, 504],
 					"description": "HTTP status codes that trigger a retry."
 				},
+				"omnichat.retry.retryRequestErrors": {
+					"type": "boolean",
+					"default": true,
+					"description": "Retry request errors such as retryable HTTP status codes (429/5xx) and per-attempt timeouts."
+				},
+				"omnichat.retry.retryNetworkErrors": {
+					"type": "boolean",
+					"default": true,
+					"description": "Retry network or stream interruption errors such as terminated, aborted, ECONNRESET, or socket hang up."
+				},
 				"omnichat.retry.timeoutMs": {
 					"type": "number",
 					"default": 120000,
@@ -469,7 +504,7 @@
 				"omnichat.retry.retryEmptyResponse": {
 					"type": "boolean",
 					"default": true,
-					"description": "Automatically retry if the API returns an empty response."
+					"description": "Retry when the request succeeds but the response stream finishes without yielding any content."
 				},
 				"omnichat.systemPrompt.mode": {
 					"type": "string",

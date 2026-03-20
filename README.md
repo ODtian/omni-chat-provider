@@ -206,10 +206,16 @@ Model-level settings:
   "maxAttempts": 3,
   "intervalMs": 1000,
   "statusCodes": [429, 500, 502, 503, 504],
+  "retryRequestErrors": true,
+  "retryNetworkErrors": true,
   "retryEmptyResponse": true,
   "timeoutMs": 120000
 }
 ```
+
+- `retryRequestErrors`: Retry request errors such as retryable HTTP status codes (`429`, `5xx`) and per-attempt timeouts.
+- `retryNetworkErrors`: Retry network or stream interruption errors such as `terminated`, `aborted`, `ECONNRESET`, and `socket hang up`.
+- `retryEmptyResponse`: Retry when the request succeeds but the response stream finishes without yielding any content.
 
 ### Delay
 

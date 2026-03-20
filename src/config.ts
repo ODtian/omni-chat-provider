@@ -86,16 +86,17 @@ export class Config {
 	// ── Retry ──
 
 	static getRetryConfig(): Required<RetryConfig> {
-		const raw = vscode.workspace
-			.getConfiguration()
-			.get<RetryConfig>(`${SECTION}.retry`, {});
+		const omnichatConfig = vscode.workspace.getConfiguration(SECTION);
+		const raw = omnichatConfig.get<RetryConfig>("retry", {});
 		return {
-			enabled: raw.enabled ?? true,
-			maxAttempts: raw.maxAttempts ?? 3,
-			intervalMs: raw.intervalMs ?? 1000,
-			statusCodes: raw.statusCodes ?? [],
-			retryEmptyResponse: raw.retryEmptyResponse ?? true,
-			timeoutMs: raw.timeoutMs ?? 120000,
+			enabled: omnichatConfig.get<boolean>("retry.enabled", raw.enabled ?? true),
+			maxAttempts: omnichatConfig.get<number>("retry.maxAttempts", raw.maxAttempts ?? 3),
+			intervalMs: omnichatConfig.get<number>("retry.intervalMs", raw.intervalMs ?? 1000),
+			statusCodes: omnichatConfig.get<number[]>("retry.statusCodes", raw.statusCodes ?? []),
+			retryRequestErrors: omnichatConfig.get<boolean>("retry.retryRequestErrors", raw.retryRequestErrors ?? true),
+			retryNetworkErrors: omnichatConfig.get<boolean>("retry.retryNetworkErrors", raw.retryNetworkErrors ?? true),
+			retryEmptyResponse: omnichatConfig.get<boolean>("retry.retryEmptyResponse", raw.retryEmptyResponse ?? true),
+			timeoutMs: omnichatConfig.get<number>("retry.timeoutMs", raw.timeoutMs ?? 120000),
 		};
 	}
 

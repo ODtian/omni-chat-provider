@@ -6,8 +6,24 @@ import type { RetryAttemptInfo, RetryConfig } from "../types";
 const DEFAULT_RETRYABLE_CODES = [429, 500, 502, 503, 504];
 
 const NETWORK_ERROR_PATTERNS = [
-	"fetch failed", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND",
-	"ECONNREFUSED", "timeout", "TIMEOUT", "network error", "NetworkError",
+	"fetch failed",
+	"econnreset",
+	"etimedout",
+	"enotfound",
+	"econnrefused",
+	"econnaborted",
+	"ehostunreach",
+	"enetunreach",
+	"eai_again",
+	"timeout",
+	"network error",
+	"networkerror",
+	"terminated",
+	"aborterror",
+	"aborted",
+	"socket hang up",
+	"premature close",
+	"other side closed",
 ];
 
 /**
@@ -16,7 +32,8 @@ const NETWORK_ERROR_PATTERNS = [
 export async function executeWithRetry<T>(
 	fn: () => Promise<T>,
 	config: Required<RetryConfig>,
-	onRetry?: (info: RetryAttemptInfo) => void | Promise<void>
+	onRetry?: (info: RetryAttemptInfo) => void | Promise<void>,
+	shouldRetry?: (error: Error) => boolean | undefined
 ): Promise<T> {
 	if (!config.enabled) {
 		return await fn();
@@ -44,15 +61,16 @@ export async function executeWithRetry<T>(
 		} catch (error) {
 			if (timeoutId) { clearTimeout(timeoutId); }
 			lastError = error instanceof Error ? error : new Error(String(error));
+			const normalizedMessage = lastError.message.toLowerCase();
 
 			const isRetryableStatus = retryableCodes.some((code) =>
-				lastError?.message.includes(`[${code}]`)
+				normalizedMessage.includes(`[${code}]`)
 			);
 			const isRetryableNetwork = NETWORK_ERROR_PATTERNS.some((pattern) =>
-				lastError?.message.includes(pattern)
+				normalizedMessage.includes(pattern)
 			);
-			const isTimeout = lastError?.message.includes("[TIMEOUT]");
-			const isEmptyResponse = lastError?.message.includes("[EMPTY_RESPONSE]");
+			const isTimeout = normalizedMessage.includes("[timeout]");
+			const isEmptyResponse = normalizedMessage.includes("[empty_response]");
 			const reason: RetryAttemptInfo["reason"] = isTimeout
 				? "timeout"
 				: isEmptyResponse
@@ -62,9 +80,21 @@ export async function executeWithRetry<T>(
 						: isRetryableNetwork
 							? "network"
 							: "other";
+			const shouldRetryRequestError =
+				config.retryRequestErrors && (isRetryableStatus || isTimeout);
+			const shouldRetryNetworkError =
+				config.retryNetworkErrors && isRetryableNetwork;
+			const shouldRetryEmptyResponse =
+				config.retryEmptyResponse && isEmptyResponse;
+			const defaultRetryable =
+				shouldRetryRequestError || shouldRetryNetworkError || shouldRetryEmptyResponse;
+			const retryDecision = shouldRetry?.(lastError);
+			const canRetry = typeof retryDecision === "boolean"
+				? retryDecision
+				: defaultRetryable;
 
 			if (
-				(!isRetryableStatus && !isRetryableNetwork && !isTimeout && !isEmptyResponse) ||
+				!canRetry ||
 				attempt === config.maxAttempts
 			) {
 				throw lastError;
