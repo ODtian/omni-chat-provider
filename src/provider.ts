@@ -234,7 +234,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 
 				const result = await adapter.processStream(res.body, safeProgress, token);
 
-				if (retryConfig.retryEmptyResponse && !adapter.hasEmittedAnyContent) {
+				if (retryConfig.retryEmptyResponse && !adapter.hasEmittedResponseContent) {
 					throw new Error("API stream ended without yielding any content [EMPTY_RESPONSE]");
 				}
 
@@ -273,21 +273,17 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					reason: info.reason,
 					nextRetryAt: info.nextRetryAt.toISOString(),
 				}));
-			}, () => {
+			}, (_error) => {
 				if (token.isCancellationRequested) {
 					return false;
 				}
 
-				if (activeAdapter?.lastStreamInterruptedDuringThinking) {
-					console.warn("[OmniChat] Allow retry because the stream was interrupted during thinking.");
-					return true;
-				}
-
-				if (activeAdapter?.hasEmittedAnyContent) {
+				if (activeAdapter?.hasEmittedResponseContent) {
 					console.warn("[OmniChat] Skip retry because partial content has already been emitted.");
 					return false;
 				}
 
+				console.warn("[OmniChat] Allow retry because no response content has been emitted yet.");
 				return undefined;
 			});
 		} catch (err) {

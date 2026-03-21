@@ -68,6 +68,14 @@ export abstract class BaseAdapter {
 		return this._hasEmittedText || this._hasEmittedThinking || this._completedToolCallIndices.size > 0;
 	}
 
+	/**
+	 * Returns true if any non-thinking response content has been emitted.
+	 * Thinking-only output should still be considered retryable empty output.
+	 */
+	public get hasEmittedResponseContent(): boolean {
+		return this._hasEmittedText || this._completedToolCallIndices.size > 0;
+	}
+
 	public get lastStreamInterruptedDuringThinking(): boolean {
 		return this._lastStreamInterruptedDuringThinking;
 	}
