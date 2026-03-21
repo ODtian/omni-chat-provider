@@ -122,6 +122,9 @@ export class OllamaAdapter extends BaseAdapter {
 					} catch { /* ignore */ }
 				}
 			}
+		} catch (error) {
+			this.markStreamInterruptedDuringThinking();
+			throw error;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);

@@ -51,6 +51,7 @@ export abstract class BaseAdapter {
 	protected _currentThinkingId: string | null = null;
 	protected _thinkingBuffer = "";
 	protected _thinkingFlushTimer: NodeJS.Timeout | null = null;
+	protected _lastStreamInterruptedDuringThinking = false;
 
 	// ── XML think block parsing ──
 	protected _xmlThinkActive = false;
@@ -65,6 +66,10 @@ export abstract class BaseAdapter {
 	 */
 	public get hasEmittedAnyContent(): boolean {
 		return this._hasEmittedText || this._hasEmittedThinking || this._completedToolCallIndices.size > 0;
+	}
+
+	public get lastStreamInterruptedDuringThinking(): boolean {
+		return this._lastStreamInterruptedDuringThinking;
 	}
 
 	/**
@@ -186,6 +191,12 @@ export abstract class BaseAdapter {
 		if (this._thinkingFlushTimer) {
 			clearTimeout(this._thinkingFlushTimer);
 			this._thinkingFlushTimer = null;
+		}
+	}
+
+	protected markStreamInterruptedDuringThinking(): void {
+		if (this._currentThinkingId || this._thinkingBuffer.length > 0 || this._xmlThinkActive) {
+			this._lastStreamInterruptedDuringThinking = true;
 		}
 	}
 

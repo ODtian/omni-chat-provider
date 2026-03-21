@@ -5,11 +5,13 @@ import * as vscode from "vscode";
 import { OmniChatProvider } from "./provider";
 import { showPasswordInputBox } from "./utils/helpers";
 import { runProviderEditor } from "./services/providerSetup";
+import { CommitMessageService } from "./services/commitMessageService";
 
 export function activate(context: vscode.ExtensionContext) {
 	console.log("[OmniChat] Extension activating...");
 
 	const provider = new OmniChatProvider(context.secrets);
+	const commitMessageService = new CommitMessageService(context.extension.id, context.secrets);
 	let disposable: vscode.Disposable;
 	const registerProvider = () => {
 		disposable?.dispose();
@@ -18,6 +20,7 @@ export function activate(context: vscode.ExtensionContext) {
 	};
 	registerProvider();
 	context.subscriptions.push({ dispose: () => disposable.dispose() });
+	context.subscriptions.push(commitMessageService);
 
 	// ── Config change watcher ──
 	context.subscriptions.push(
@@ -63,6 +66,30 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("omnichat.setProviderApiKey", async () => {
 			await runProviderEditor(context.secrets);
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("omnichat.generateCommitMessage", async () => {
+			await commitMessageService.generateCommitMessage();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("omnichat.abortCommitMessage", () => {
+			commitMessageService.abort();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("omnichat.selectCommitMessageModel", async () => {
+			await commitMessageService.selectCommitMessageModel();
+		})
+	);
+
+	context.subscriptions.push(
+		vscode.commands.registerCommand("omnichat.editCommitMessagePrompt", async () => {
+			await commitMessageService.editCommitMessagePrompt();
 		})
 	);
 }

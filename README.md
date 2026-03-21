@@ -14,6 +14,7 @@ The extension contributes a single vendor, `OmniChat`, to Copilot's language mod
 - Retry, delay, custom headers, and system-prompt interception
 - Optional model variants via `configId`
 - Commit message generation command
+- Commit message model selection and prompt editing commands
 
 ## How It Works
 
@@ -248,6 +249,36 @@ Modes:
 - `replace`
 - `append`
 - `disable`
+
+### Commit message generation
+
+```jsonc
+"omnichat.commitLanguage": "English",
+"omnichat.commitMessageModel": "openai/gpt-5.4::reasoning",
+"omnichat.commitMessagePrompt": ""
+```
+
+- `commitLanguage`: 生成 commit message 的语言
+- `commitMessageModel`: 指定用于生成 commit message 的模型，格式为 `providerId/modelId` 或 `providerId/modelId::configId`
+- `commitMessagePrompt`: 追加的自定义 commit prompt
+
+Commands:
+
+- `OmniChat: Generate Commit Message`
+- `OmniChat: Stop Generating Commit Message`
+- `OmniChat: Select Commit Message Model`
+- `OmniChat: Edit Commit Message Prompt`
+
+The generator prefers staged changes and falls back to unstaged changes when nothing is staged. It will also trim oversized diffs to fit the selected model budget.
+
+## Token counting
+
+`provideTokenCount` now uses a provider-aware strategy:
+
+- `gemini`: native `countTokens` endpoint when available
+- `anthropic`: native token count endpoint when available
+- `openai` / `openai-responses`: local `tiktoken` estimation with message-structure overhead
+- others: improved heuristic fallback for text, thinking parts, tools, and images
 
 ## Build
 

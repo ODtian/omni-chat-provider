@@ -51,38 +51,43 @@
 			},
 			{
 				"command": "omnichat.generateCommitMessage",
-				"title": "Generate Commit Message",
+				"title": "Generate Commit Message via OmniChat",
 				"category": "OmniChat",
 				"icon": "$(wand)"
 			},
 			{
 				"command": "omnichat.abortCommitMessage",
-				"title": "Stop Generating Commit Message",
+				"title": "Stop Generating Commit Message via OmniChat",
 				"category": "OmniChat",
 				"icon": "$(debug-stop)"
+			},
+			{
+				"command": "omnichat.selectCommitMessageModel",
+				"title": "Select Commit Message Model",
+				"category": "OmniChat",
+				"icon": "$(symbol-key)"
+			},
+			{
+				"command": "omnichat.editCommitMessagePrompt",
+				"title": "Edit Commit Message Prompt",
+				"category": "OmniChat",
+				"icon": "$(edit)"
 			}
 		],
 		"menus": {
 			"scm/title": [
 				{
 					"command": "omnichat.generateCommitMessage",
-					"group": "navigation",
-					"when": "config.git.enabled && scmProvider == git && !omnichat.isGeneratingCommit"
-				},
-				{
-					"command": "omnichat.abortCommitMessage",
-					"group": "navigation",
-					"when": "config.git.enabled && scmProvider == git && omnichat.isGeneratingCommit"
+					"group": "navigation@1",
+					"when": "config.git.enabled && scmProvider == git"
 				}
 			],
 			"commandPalette": [
 				{
-					"command": "omnichat.generateCommitMessage",
-					"when": "config.git.enabled && !omnichat.isGeneratingCommit"
+					"command": "omnichat.selectCommitMessageModel"
 				},
 				{
-					"command": "omnichat.abortCommitMessage",
-					"when": "config.git.enabled && omnichat.isGeneratingCommit"
+					"command": "omnichat.editCommitMessagePrompt"
 				}
 			]
 		},
@@ -533,6 +538,11 @@
 						"Czech", "Portuguese (Brazil)", "Turkish", "Polish"
 					],
 					"description": "Language for generated Git commit messages."
+				},
+				"omnichat.commitMessageModel": {
+					"type": "string",
+					"default": "",
+					"description": "Scoped model ID used for Git commit message generation, for example `openai/gpt-5.4` or `openai/gpt-5.4::reasoning`."
 				},
 				"omnichat.commitMessagePrompt": {
 					"type": "string",

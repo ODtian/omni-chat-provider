@@ -1,52 +1,155 @@
 // ──────────────────────────────────────────────────────────────
-// Gemini native API adapter (stub — to be filled from old code)
+// Gemini native API adapter
 // ──────────────────────────────────────────────────────────────
 import * as vscode from "vscode";
 import {
 	CancellationToken,
 	LanguageModelChatRequestMessage,
 	LanguageModelResponsePart2,
+	LanguageModelToolCallPart,
 	Progress,
 	ProvideLanguageModelChatResponseOptions,
 } from "vscode";
 
 import type { ModelItem } from "../types";
 import { BaseAdapter, type PreparedRequest, type StreamResult } from "./base";
-import { mapRole } from "../utils/helpers";
+import {
+	collectToolResultText,
+	isToolResultPart,
+	mapRole,
+	tryParseJSON,
+} from "../utils/helpers";
+import { convertToolsToGemini } from "../utils/toolConverter";
+
+const GEMINI_SIGNATURE_MARKER_TYPE = "gemini_thought_signature";
+
+interface GeminiPart {
+	text?: string;
+	thought?: boolean;
+	thoughtSignature?: string;
+	functionCall?: {
+		id?: string;
+		name: string;
+		args?: Record<string, unknown>;
+	};
+	functionResponse?: {
+		id?: string;
+		name: string;
+		response: Record<string, unknown>;
+	};
+}
+
+interface GeminiContent {
+	role: "user" | "model";
+	parts: GeminiPart[];
+}
 
 export class GeminiAdapter extends BaseAdapter {
+	private _directToolCallSequence = 0;
+
 	convertMessages(
 		messages: readonly LanguageModelChatRequestMessage[],
 		_modelConfig: { includeReasoningInRequest: boolean }
 	): unknown[] {
 		const systemParts: string[] = [];
-		const contents: unknown[] = [];
+		const contents: GeminiContent[] = [];
+		const toolCallNames = new Map<string, string>();
 
 		for (const m of messages) {
 			const role = mapRole(m);
-			const textParts: string[] = [];
+			const parts: GeminiPart[] = [];
+			let lastAttachablePart: GeminiPart | undefined;
+
 			for (const part of m.content ?? []) {
 				if (part instanceof vscode.LanguageModelTextPart) {
-					textParts.push(part.value);
+					if (!part.value) {
+						continue;
+					}
+
+					const geminiPart: GeminiPart = { text: part.value };
+					parts.push(geminiPart);
+					lastAttachablePart = geminiPart;
+					continue;
 				}
+
+				if (part instanceof vscode.LanguageModelToolCallPart) {
+					toolCallNames.set(part.callId, part.name);
+					const geminiPart: GeminiPart = {
+						functionCall: {
+							id: part.callId,
+							name: part.name,
+							args: part.input as Record<string, unknown>,
+						},
+					};
+					parts.push(geminiPart);
+					lastAttachablePart = geminiPart;
+					continue;
+				}
+
+				if (isToolResultPart(part)) {
+					const responseText = collectToolResultText(part);
+					const parsed = tryParseJSON(responseText);
+					const functionName = toolCallNames.get(part.callId) ?? part.callId;
+					const geminiPart: GeminiPart = {
+						functionResponse: {
+							id: part.callId,
+							name: functionName,
+							response: parsed.ok ? parsed.value : { result: responseText || "" },
+						},
+					};
+					parts.push(geminiPart);
+					lastAttachablePart = geminiPart;
+					continue;
+				}
+
+				if (!(part instanceof vscode.LanguageModelThinkingPart)) {
+					continue;
+				}
+
+				const metadata = part.metadata as { type?: string; thoughtSignature?: string } | undefined;
+				if (metadata?.type === "retry_notice") {
+					continue;
+				}
+
+				if (metadata?.type === GEMINI_SIGNATURE_MARKER_TYPE) {
+					if (lastAttachablePart && typeof metadata.thoughtSignature === "string") {
+						lastAttachablePart.thoughtSignature = metadata.thoughtSignature;
+					}
+					continue;
+				}
+
+				const thinkingText = Array.isArray(part.value) ? part.value.join("") : part.value;
+				if (!thinkingText) {
+					continue;
+				}
+
+				const geminiPart: GeminiPart = {
+					text: thinkingText,
+					thought: true,
+				};
+				if (typeof metadata?.thoughtSignature === "string") {
+					geminiPart.thoughtSignature = metadata.thoughtSignature;
+				}
+				parts.push(geminiPart);
+				lastAttachablePart = geminiPart;
 			}
-			const joinedText = textParts.join("").trim();
+
+			const joinedText = parts
+				.map((part) => part.text ?? "")
+				.join("")
+				.trim();
 
 			if (role === "system" && joinedText) {
 				systemParts.push(joinedText);
 				continue;
 			}
 
-			if (joinedText) {
+			if (parts.length > 0) {
 				const geminiRole = role === "assistant" ? "model" : "user";
-				contents.push({
-					role: geminiRole,
-					parts: [{ text: joinedText }],
-				});
+				contents.push({ role: geminiRole, parts });
 			}
 		}
 
-		// Store system content for use in buildRequest
 		if (systemParts.length > 0) {
 			this._systemContent = systemParts.join("\n");
 		}
@@ -59,7 +162,7 @@ export class GeminiAdapter extends BaseAdapter {
 		baseUrl: string,
 		apiKey: string,
 		messages: unknown[],
-		_options?: ProvideLanguageModelChatResponseOptions
+		options?: ProvideLanguageModelChatResponseOptions
 	): PreparedRequest {
 		const body: Record<string, unknown> = {
 			contents: messages,
@@ -72,7 +175,6 @@ export class GeminiAdapter extends BaseAdapter {
 			};
 		}
 
-		// Generation config with Gemini-native parameter names
 		const genConfig: Record<string, unknown> = {};
 		if (model.temperature !== undefined && model.temperature !== null) {
 			genConfig.temperature = model.temperature;
@@ -91,20 +193,25 @@ export class GeminiAdapter extends BaseAdapter {
 			body.generationConfig = genConfig;
 		}
 
-		// Thinking config
 		const thinkingConfig = (model as any).thinkingConfig;
 		if (thinkingConfig && typeof thinkingConfig === "object") {
 			body.thinkingConfig = thinkingConfig;
 		}
 
-		// Extra
+		const toolConfig = convertToolsToGemini(options);
+		if (toolConfig.tools) {
+			body.tools = toolConfig.tools;
+		}
+		if (toolConfig.toolConfig) {
+			body.toolConfig = toolConfig.toolConfig;
+		}
+
 		if (model.extra) {
 			for (const [key, value] of Object.entries(model.extra)) {
 				if (value !== undefined) { body[key] = value; }
 			}
 		}
 
-		// Build Gemini URL
 		const normalized = baseUrl.replace(/\/+$/, "");
 		const url = `${normalized}/v1beta/models/${model.id}:streamGenerateContent?alt=sse`;
 		const headers = BaseAdapter.prepareHeaders(apiKey, "gemini", model.headers);
@@ -139,13 +246,19 @@ export class GeminiAdapter extends BaseAdapter {
 					try {
 						const parsed = JSON.parse(data) as Record<string, unknown>;
 						this.processGeminiChunk(parsed, progress);
-					} catch { /* ignore */ }
+					} catch {
+						// ignore malformed chunk
+					}
 				}
 			}
+		} catch (error) {
+			this.markStreamInterruptedDuringThinking();
+			throw error;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);
 		}
+
 		return {};
 	}
 
@@ -163,13 +276,70 @@ export class GeminiAdapter extends BaseAdapter {
 		if (!Array.isArray(parts)) { return; }
 
 		for (const part of parts) {
-			if (typeof part.text === "string" && part.text) {
+			const text = typeof part.text === "string" ? part.text : "";
+			const isThought = part.thought === true;
+			const thoughtSignature = typeof part.thoughtSignature === "string"
+				? part.thoughtSignature
+				: undefined;
+			const functionCall = part.functionCall as Record<string, unknown> | undefined;
+
+			if (text) {
+				if (isThought) {
+					this.bufferThinkingContent(text, progress);
+					if (thoughtSignature) {
+						this.flushThinkingBuffer(progress);
+						this.reportThoughtSignatureMarker(thoughtSignature, progress);
+					}
+					continue;
+				}
+
 				this.reportEndThinking(progress);
-				const res = this.processTextContent(part.text, progress);
-				if (res.emittedAny) { this._hasEmittedAssistantText = true; }
-			} else if (typeof part.thought === "string" && part.thought) {
-				this.bufferThinkingContent(part.thought, progress);
+				const res = this.processTextContent(text, progress);
+				if (res.emittedAny) {
+					this._hasEmittedAssistantText = true;
+					if (thoughtSignature) {
+						this.reportThoughtSignatureMarker(thoughtSignature, progress);
+					}
+				}
+				continue;
+			}
+
+			if (functionCall && typeof functionCall.name === "string") {
+				this.reportEndThinking(progress);
+				if (!this._emittedBeginToolCallsHint && this._hasEmittedAssistantText) {
+					progress.report(new vscode.LanguageModelTextPart(" "));
+					this._emittedBeginToolCallsHint = true;
+				}
+
+				const callId = typeof functionCall.id === "string"
+					? functionCall.id
+					: `call_${Date.now()}_${this._directToolCallSequence}`;
+				const args = functionCall.args && typeof functionCall.args === "object"
+					? functionCall.args as Record<string, unknown>
+					: {};
+
+				progress.report(new LanguageModelToolCallPart(callId, functionCall.name, args));
+				this._completedToolCallIndices.add(this._directToolCallSequence++);
+				if (thoughtSignature) {
+					this.reportThoughtSignatureMarker(thoughtSignature, progress);
+				}
+				continue;
+			}
+
+			if (thoughtSignature) {
+				this.flushThinkingBuffer(progress);
+				this.reportThoughtSignatureMarker(thoughtSignature, progress);
 			}
 		}
+	}
+
+	private reportThoughtSignatureMarker(
+		thoughtSignature: string,
+		progress: Progress<LanguageModelResponsePart2>
+	): void {
+		progress.report(new vscode.LanguageModelThinkingPart("", undefined, {
+			type: GEMINI_SIGNATURE_MARKER_TYPE,
+			thoughtSignature,
+		}));
 	}
 }

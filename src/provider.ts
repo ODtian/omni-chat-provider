@@ -10,10 +10,11 @@ import {
 } from "vscode";
 
 import type { ApiMode, ModelItem } from "./types";
-import { buildScopedModelId, Config, parseScopedModelId } from "./config";
+import { buildScopedModelId, Config, findConfiguredModelById, parseScopedModelId } from "./config";
 import { ApiKeyManager } from "./services/apiKeyManager";
 import { executeWithRetry } from "./services/retryService";
 import { interceptSystemPrompt } from "./prompt/interceptor";
+import { countTokensForInput } from "./services/tokenCounter";
 
 import { BaseAdapter } from "./adapters/base";
 import { OpenAIAdapter } from "./adapters/openai";
@@ -119,20 +120,23 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	}
 
 	async provideTokenCount(
-		_model: LanguageModelChatInformation,
+		model: LanguageModelChatInformation,
 		text: string | LanguageModelChatRequestMessage,
-		_token: CancellationToken
+		token: CancellationToken
 	): Promise<number> {
-		if (typeof text === "string") {
-			return Math.ceil(text.length / 4);
+		const resolvedModel = findConfiguredModelById(model.id);
+		if (!resolvedModel) {
+			return typeof text === "string"
+				? Math.ceil(text.length / 4)
+				: 4;
 		}
-		let total = 4;
-		for (const part of text.content) {
-			if (part instanceof vscode.LanguageModelTextPart) {
-				total += Math.ceil(part.value.length / 4);
-			}
-		}
-		return total;
+
+		return await countTokensForInput({
+			input: text,
+			keyManager: this._keyManager,
+			model: resolvedModel,
+			token,
+		});
 	}
 
 	async provideLanguageModelChatResponse(
@@ -150,6 +154,15 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					console.error("[OmniChat] Progress.report failed", e);
 				}
 			},
+		};
+		let activeRetryNoticeId: string | undefined;
+		const closeRetryNotice = () => {
+			if (!activeRetryNoticeId) {
+				return;
+			}
+
+			safeProgress.report(new vscode.LanguageModelThinkingPart("", activeRetryNoticeId));
+			activeRetryNoticeId = undefined;
 		};
 
 		try {
@@ -189,6 +202,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			let retryNoticeCount = 0;
 			let activeAdapter: BaseAdapter | undefined;
 			await executeWithRetry(async () => {
+				closeRetryNotice();
 				const adapter = this.createAdapter(apiMode);
 				activeAdapter = adapter;
 				const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
@@ -251,17 +265,22 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 								: "Request error";
 				const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
 
-				const thinkingId = `retry_notice_${Date.now()}_${retryNoticeCount}_${Math.random().toString(36).slice(2, 6)}`;
-				safeProgress.report(new vscode.LanguageModelThinkingPart(body, thinkingId, {
+				closeRetryNotice();
+				activeRetryNoticeId = `retry_notice_${Date.now()}_${retryNoticeCount}_${Math.random().toString(36).slice(2, 6)}`;
+				safeProgress.report(new vscode.LanguageModelThinkingPart(body, activeRetryNoticeId, {
 					type: "retry_notice",
 					attemptNumber: info.attemptNumber,
 					reason: info.reason,
 					nextRetryAt: info.nextRetryAt.toISOString(),
 				}));
-				safeProgress.report(new vscode.LanguageModelThinkingPart("", thinkingId));
 			}, () => {
 				if (token.isCancellationRequested) {
 					return false;
+				}
+
+				if (activeAdapter?.lastStreamInterruptedDuringThinking) {
+					console.warn("[OmniChat] Allow retry because the stream was interrupted during thinking.");
+					return true;
 				}
 
 				if (activeAdapter?.hasEmittedAnyContent) {
@@ -282,26 +301,16 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			});
 			throw new Error(truncateErrorForUser(message));
 		} finally {
+			closeRetryNotice();
 			this._lastRequestTime = Date.now();
 		}
 	}
 
 	private findModelConfig(parsedId: { providerId: string; baseId: string; configId?: string }): ModelItem | undefined {
-		const models = parsedId.providerId
-			? Config.getModelsForProvider(parsedId.providerId)
-			: Config.getModels();
-
-		let found = models.find((model) =>
-			model.id === parsedId.baseId &&
-			((parsedId.configId && model.configId === parsedId.configId) ||
-				(!parsedId.configId && !model.configId))
-		);
-
-		if (!found) {
-			found = models.find((model) => model.id === parsedId.baseId);
-		}
-
-		return found;
+		const scopedId = parsedId.providerId
+			? `${parsedId.providerId}/${parsedId.baseId}${parsedId.configId ? `::${parsedId.configId}` : ""}`
+			: parsedId.baseId;
+		return findConfiguredModelById(scopedId);
 	}
 
 	private async applyDelay(model?: ModelItem): Promise<void> {

@@ -19,6 +19,14 @@ export interface OpenAIResponsesFunctionToolDef {
 	parameters?: object;
 }
 
+export interface GeminiFunctionToolDef {
+	functionDeclarations: Array<{
+		name: string;
+		description?: string;
+		parameters?: object;
+	}>;
+}
+
 /**
  * Convert VS Code tool definitions to OpenAI Chat Completions format.
  */
@@ -84,4 +92,56 @@ export function convertToolsToResponses(options?: vscode.ProvideLanguageModelCha
 	}
 
 	return { tools, tool_choice };
+}
+
+/**
+ * Convert VS Code tool definitions to Gemini GenerateContent format.
+ */
+export function convertToolsToGemini(options?: vscode.ProvideLanguageModelChatResponseOptions): {
+	tools?: GeminiFunctionToolDef[];
+	toolConfig?: {
+		functionCallingConfig: {
+			mode: "AUTO" | "ANY";
+			allowedFunctionNames?: string[];
+		};
+	};
+} {
+	const chatTools = convertToolsToOpenAI(options);
+	if (!chatTools.tools?.length) {
+		return {};
+	}
+
+	const tools: GeminiFunctionToolDef[] = [{
+		functionDeclarations: chatTools.tools.map((t) => ({
+			name: t.function.name,
+			description: t.function.description,
+			parameters: t.function.parameters,
+		})),
+	}];
+
+	let toolConfig:
+		| {
+				functionCallingConfig: {
+					mode: "AUTO" | "ANY";
+					allowedFunctionNames?: string[];
+				};
+		  }
+		| undefined;
+
+	if (chatTools.tool_choice === "auto") {
+		toolConfig = {
+			functionCallingConfig: {
+				mode: "AUTO",
+			},
+		};
+	} else if (chatTools.tool_choice?.type === "function") {
+		toolConfig = {
+			functionCallingConfig: {
+				mode: "ANY",
+				allowedFunctionNames: [chatTools.tool_choice.function.name],
+			},
+		};
+	}
+
+	return { tools, toolConfig };
 }

@@ -287,6 +287,9 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 					} catch { /* ignore malformed */ }
 				}
 			}
+		} catch (error) {
+			this.markStreamInterruptedDuringThinking();
+			throw error;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);

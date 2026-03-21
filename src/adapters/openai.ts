@@ -208,6 +208,9 @@ export class OpenAIAdapter extends BaseAdapter {
 					}
 				}
 			}
+		} catch (error) {
+			this.markStreamInterruptedDuringThinking();
+			throw error;
 		} finally {
 			reader.releaseLock();
 			this.reportEndThinking(progress);

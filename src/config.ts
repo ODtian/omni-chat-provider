@@ -140,6 +140,12 @@ export class Config {
 			.get<string>(`${SECTION}.commitLanguage`, "English");
 	}
 
+	static getCommitMessageModel(): string {
+		return vscode.workspace
+			.getConfiguration()
+			.get<string>(`${SECTION}.commitMessageModel`, "");
+	}
+
 	static getCommitMessagePrompt(): string {
 		return vscode.workspace
 			.getConfiguration()
@@ -281,4 +287,32 @@ export function parseScopedModelId(modelId: string): ParsedScopedModelId {
 		baseId: decodeModelSegment(scopedPart.slice(slashIdx + 1)),
 		configId: configIdx >= 0 ? decodeModelSegment(modelId.slice(configIdx + 2)) : undefined,
 	};
+}
+
+export function findConfiguredModelById(modelId: string): ModelItem | undefined {
+	const trimmed = modelId.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+
+	const parsed = parseScopedModelId(trimmed);
+	const models = parsed.providerId
+		? Config.getModelsForProvider(parsed.providerId)
+		: Config.getModels();
+
+	let found = models.find((model) =>
+		model.id === parsed.baseId &&
+		((parsed.configId && model.configId === parsed.configId) ||
+			(!parsed.configId && !model.configId))
+	);
+
+	if (!found) {
+		found = models.find((model) => model.id === parsed.baseId);
+	}
+
+	if (found) {
+		return found;
+	}
+
+	return Config.getModels().find((model) => buildScopedModelId(model) === trimmed);
 }
