@@ -18,7 +18,7 @@
 	},
 	"categories": ["AI", "Chat"],
 	"license": "MIT",
-	"enabledApiProposals": ["chatProvider"],
+	"enabledApiProposals": ["chatProvider", "languageModelThinkingPart"],
 	"activationEvents": ["onStartupFinished"],
 	"contributes": {
 		"languageModelChatProviders": [
