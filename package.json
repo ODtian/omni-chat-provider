@@ -555,6 +555,7 @@
 	"main": "./out/extension.js",
 	"scripts": {
 		"vscode:prepublish": "pnpm run bundle",
+		"bump": "node scripts/bump-version.mjs",
 		"download-api": "dts dev && mv vscode.proposed.*.ts src",
 		"compile": "tsc -p ./",
 		"bundle": "pnpm exec esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",

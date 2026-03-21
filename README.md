@@ -300,6 +300,18 @@ Package VSIX:
 npm run package
 ```
 
+自动 bump 版本：
+
+```bash
+pnpm run bump           # patch
+pnpm run bump minor
+pnpm run bump major
+pnpm run bump 0.2.0
+pnpm run bump -- --dry-run
+```
+
+如果执行前 Git 工作树是干净的，脚本还会自动创建一条 `chore: bump version to x.y.z` 提交，并打上 `vx.y.z` tag。
+
 ## GitHub Actions
 
 The repository includes:
