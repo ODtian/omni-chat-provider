@@ -1,7 +1,6 @@
 // ──────────────────────────────────────────────────────────────
-// OpenAI Responses API adapter (stub)
+// OpenAI Responses API adapter
 // ──────────────────────────────────────────────────────────────
-import * as vscode from "vscode";
 import {
 	CancellationToken,
 	LanguageModelChatRequestMessage,
@@ -10,11 +9,11 @@ import {
 	ProvideLanguageModelChatResponseOptions,
 } from "vscode";
 
-import type { ModelItem } from "../types";
-import { BaseAdapter, type PreparedRequest, type StreamResult } from "./base";
+import type { ModelItem, OpenAIResponsesModelItem } from "../types";
+import { BaseAdapter, type AdapterContextScope, type ConvertedMessages, type PreparedRequest, type StreamResult } from "./base";
 import {
-	mapRole, isImageMimeType, createDataUrl,
-	isToolResultPart, collectToolResultText,
+	createDataUrl,
+	normalizeChatMessage,
 } from "../utils/helpers";
 import { convertToolsToResponses } from "../utils/toolConverter";
 
@@ -66,53 +65,106 @@ type ResponsesInputItem =
 	| ResponsesReasoning;
 
 export class OpenAIResponsesAdapter extends BaseAdapter {
+	private static readonly _responseStateByKey = new Map<string, string>();
+	private static readonly _maxResponseStateEntries = 256;
+
 	private _responseId: string | null = null;
+	private _previousResponseId: string | null = null;
+	private _requestStateKey: string | null = null;
 	private _responsesDeltaEmitted = false;
 
 	get responseId(): string | null {
 		return this._responseId;
 	}
 
+	setPreviousResponseId(responseId: string | null | undefined): void {
+		if (typeof responseId === "string" && responseId.trim()) {
+			this._previousResponseId = responseId.trim();
+			return;
+		}
+		this._previousResponseId = null;
+	}
+
+	get previousResponseId(): string | null {
+		return this._previousResponseId;
+	}
+
+	override prepareRequestScope(scope: AdapterContextScope): void {
+		const modelId = scope.modelId?.trim();
+		const initiator = scope.requestInitiator?.trim() || "unknown";
+		const conversationKey = scope.conversationKey?.trim() || "default";
+		this._requestStateKey = modelId ? `${modelId}::${conversationKey}::${initiator}` : null;
+		this.setPreviousResponseId(
+			this._requestStateKey
+				? OpenAIResponsesAdapter.getStateValue(this._requestStateKey)
+				: null
+		);
+	}
+
+	override handleRequestError(error: unknown): { retryWithFreshRequest: boolean } {
+		if (!this._previousResponseId || !this.isInvalidPreviousResponseError(error)) {
+			return { retryWithFreshRequest: false };
+		}
+
+		if (this._requestStateKey) {
+			OpenAIResponsesAdapter._responseStateByKey.delete(this._requestStateKey);
+		}
+		this.setPreviousResponseId(null);
+		return { retryWithFreshRequest: true };
+	}
+
+	override commitStreamResult(result: StreamResult): void {
+		if (!this._requestStateKey || !result.responseId) {
+			return;
+		}
+		OpenAIResponsesAdapter.setStateValue(this._requestStateKey, result.responseId);
+	}
+
+	private static getStateValue(key: string): string | undefined {
+		const value = OpenAIResponsesAdapter._responseStateByKey.get(key);
+		if (value === undefined) {
+			return undefined;
+		}
+
+		// refresh recency
+		OpenAIResponsesAdapter._responseStateByKey.delete(key);
+		OpenAIResponsesAdapter._responseStateByKey.set(key, value);
+		return value;
+	}
+
+	private static setStateValue(key: string, value: string): void {
+		if (!key || !value) {
+			return;
+		}
+
+		if (OpenAIResponsesAdapter._responseStateByKey.has(key)) {
+			OpenAIResponsesAdapter._responseStateByKey.delete(key);
+		}
+		OpenAIResponsesAdapter._responseStateByKey.set(key, value);
+
+		while (OpenAIResponsesAdapter._responseStateByKey.size > OpenAIResponsesAdapter._maxResponseStateEntries) {
+			const oldestKey = OpenAIResponsesAdapter._responseStateByKey.keys().next().value;
+			if (!oldestKey) {
+				break;
+			}
+			OpenAIResponsesAdapter._responseStateByKey.delete(oldestKey);
+		}
+	}
+
 	convertMessages(
 		messages: readonly LanguageModelChatRequestMessage[],
 		modelConfig: { includeReasoningInRequest: boolean }
-	): ResponsesInputItem[] {
+	): ConvertedMessages<ResponsesInputItem> {
 		const out: ResponsesInputItem[] = [];
+		let systemContent: string | undefined;
 
 		for (const m of messages) {
-			const role = mapRole(m);
-			const textParts: string[] = [];
-			const imageParts: vscode.LanguageModelDataPart[] = [];
-			const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
-			const toolResults: { callId: string; content: string }[] = [];
-			const thinkingParts: string[] = [];
-
-			for (const part of m.content ?? []) {
-				if (part instanceof vscode.LanguageModelTextPart) {
-					textParts.push(part.value);
-				} else if (part instanceof vscode.LanguageModelDataPart && isImageMimeType(part.mimeType)) {
-					imageParts.push(part);
-				} else if (part instanceof vscode.LanguageModelToolCallPart) {
-					const id = part.callId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-					let args = "{}";
-					try { args = JSON.stringify(part.input ?? {}); } catch { args = "{}"; }
-					toolCalls.push({ id, name: part.name, arguments: args });
-				} else if (isToolResultPart(part)) {
-					toolResults.push({
-						callId: (part as { callId?: string }).callId ?? "",
-						content: collectToolResultText(part as { content?: ReadonlyArray<unknown> }),
-					});
-				} else if (
-					part instanceof vscode.LanguageModelThinkingPart &&
-					modelConfig.includeReasoningInRequest &&
-					(part.metadata as { type?: string } | undefined)?.type !== "retry_notice"
-				) {
-					thinkingParts.push(Array.isArray(part.value) ? part.value.join("") : part.value);
-				}
-			}
-
-			const joinedText = textParts.join("").trim();
-			const joinedThinking = thinkingParts.join("").trim();
+			const normalized = normalizeChatMessage(m, {
+				includeReasoningInRequest: modelConfig.includeReasoningInRequest,
+			});
+			const role = normalized.role;
+			const joinedText = normalized.joinedText;
+			const joinedThinking = normalized.joinedThinking;
 
 			if (role === "assistant") {
 				if (joinedText) {
@@ -132,7 +184,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 						status: "completed",
 					});
 				}
-				for (const tc of toolCalls) {
+				for (const tc of normalized.toolCalls) {
 					out.push({
 						type: "function_call",
 						id: `fc_${tc.id}`,
@@ -144,7 +196,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 				}
 			}
 
-			for (const tr of toolResults) {
+			for (const tr of normalized.toolResults) {
 				if (!tr.callId) { continue; }
 				out.push({
 					type: "function_call_output",
@@ -160,7 +212,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 				if (joinedText) {
 					contentArray.push({ type: "input_text", text: joinedText });
 				}
-				for (const img of imageParts) {
+				for (const img of normalized.imageParts) {
 					contentArray.push({ type: "input_image", image_url: createDataUrl(img), detail: "auto" });
 				}
 				if (contentArray.length > 0) {
@@ -174,7 +226,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			}
 
 			if (role === "system" && joinedText) {
-				this._systemContent = joinedText;
+				systemContent = joinedText;
 			}
 		}
 
@@ -186,25 +238,33 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			}
 		}
 
-		return out;
+		return { messages: out, systemContent };
 	}
 
 	buildRequest(
 		model: ModelItem,
 		baseUrl: string,
 		apiKey: string,
-		messages: unknown[],
+		converted: ConvertedMessages<ResponsesInputItem>,
 		options?: ProvideLanguageModelChatResponseOptions
 	): PreparedRequest {
+		const responsesModel = model as OpenAIResponsesModelItem;
+		const { messages, systemContent } = converted;
+		const incrementalInput = this.pickIncrementalInput(messages);
+		const usePreviousResponse = !!(this._previousResponseId && incrementalInput.length > 0);
 		const body: Record<string, unknown> = {
 			model: model.id,
-			input: messages,
+			input: usePreviousResponse ? incrementalInput : messages,
 			stream: true,
 		};
 
+		if (usePreviousResponse && this._previousResponseId) {
+			body.previous_response_id = this._previousResponseId;
+		}
+
 		// System content → instructions
-		if (this._systemContent) {
-			body.instructions = this._systemContent;
+		if (systemContent) {
+			body.instructions = systemContent;
 		}
 
 		// Responses-native parameters
@@ -214,13 +274,13 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 		if (model.top_p !== undefined && model.top_p !== null) {
 			body.top_p = model.top_p;
 		}
-		const maxOutput = (model as any).max_output_tokens;
+		const maxOutput = responsesModel.max_output_tokens;
 		if (maxOutput !== undefined) {
 			body.max_output_tokens = maxOutput;
 		}
 
 		// Reasoning config
-		const reasoning = (model as any).reasoning;
+		const reasoning = responsesModel.reasoning;
 		if (reasoning && typeof reasoning === "object") {
 			body.reasoning = reasoning;
 		}
@@ -254,44 +314,45 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 		return { url, headers, body };
 	}
 
+	private pickIncrementalInput(messages: ResponsesInputItem[]): ResponsesInputItem[] {
+		let lastUserIndex = -1;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const item = messages[i];
+			if (item.type === "message" && item.role === "user") {
+				lastUserIndex = i;
+				break;
+			}
+		}
+
+		if (lastUserIndex < 0) {
+			return [];
+		}
+
+		return messages.slice(lastUserIndex);
+	}
+
 	async processStream(
 		responseBody: ReadableStream<Uint8Array>,
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<StreamResult> {
 		this._responseId = null;
-		const reader = responseBody.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
 
 		try {
-			while (true) {
-				if (token.isCancellationRequested) { break; }
-				const { done, value } = await reader.read();
-				if (done) { break; }
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
-				for (const line of lines) {
-					if (!line.startsWith("data:")) { continue; }
-					const data = line.slice(5).trim();
-					if (data === "[DONE]") {
-						await this.flushToolCallBuffers(progress, false);
-						continue;
-					}
+			await this.processSseStream(
+				responseBody,
+				token,
+				async (data) => {
 					try {
 						const parsed = JSON.parse(data) as Record<string, unknown>;
 						await this.processEvent(parsed, progress);
 					} catch { /* ignore malformed */ }
+				},
+				async () => {
+					await this.flushToolCallBuffers(progress, false);
 				}
-			}
-		} catch (error) {
-			this.markStreamInterruptedDuringThinking();
-			throw error;
+			);
 		} finally {
-			reader.releaseLock();
 			this.reportEndThinking(progress);
 		}
 
@@ -334,7 +395,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			case "response.thinking_summary.delta":
 			case "response.thought.delta":
 			case "response.thought_summary.delta": {
-				this._hasEmittedThinking = false;
+				this.markThinkingEmitted(false);
 				this.processReasoningText(event, progress);
 				return;
 			}
@@ -347,7 +408,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			case "response.thinking_summary.done":
 			case "response.thought.done":
 			case "response.thought_summary.done": {
-				if (this._hasEmittedThinking) { this.reportEndThinking(progress); this._hasEmittedThinking = false; return; }
+				if (this.hasThinkingEmitted()) { this.reportEndThinking(progress); this.markThinkingEmitted(false); return; }
 				this.processReasoningText(event, progress);
 				this.reportEndThinking(progress);
 				return;
@@ -356,13 +417,10 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			case "response.function_call_arguments.delta":
 			case "response.function_call_arguments.done": {
 				this.reportEndThinking(progress);
-				if (!this._emittedBeginToolCallsHint && this._hasEmittedAssistantText) {
-					progress.report(new vscode.LanguageModelTextPart(" "));
-					this._emittedBeginToolCallsHint = true;
-				}
+				this.emitBeginToolCallsHint(progress);
 
 				const idx = (event.output_index as number) ?? 0;
-				if (this._completedToolCallIndices.has(idx)) { return; }
+				if (this.hasCompletedToolCall(idx)) { return; }
 
 				const callId = this.getCallId(event);
 				const name = typeof event.name === "string" ? event.name : "";
@@ -370,7 +428,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 					? (typeof event.delta === "string" ? event.delta : "")
 					: (typeof event.arguments === "string" ? event.arguments : "");
 
-				const buf = this._toolCallBuffers.get(idx) ?? { args: "" };
+				const buf = this.getOrCreateToolCallBuffer(idx);
 				if (!buf.id && callId) { buf.id = callId; }
 				if (!buf.name && name) { buf.name = name; }
 				if (eventType.endsWith(".delta")) {
@@ -378,7 +436,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 				} else {
 					buf.args = chunk;
 				}
-				this._toolCallBuffers.set(idx, buf);
+				this.setToolCallBuffer(idx, buf);
 
 				await this.tryEmitBufferedToolCall(idx, progress);
 				if (eventType.endsWith(".done")) {
@@ -395,23 +453,20 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 				if (!item || item.type !== "function_call") { return; }
 
 				this.reportEndThinking(progress);
-				if (!this._emittedBeginToolCallsHint && this._hasEmittedAssistantText) {
-					progress.report(new vscode.LanguageModelTextPart(" "));
-					this._emittedBeginToolCallsHint = true;
-				}
+				this.emitBeginToolCallsHint(progress);
 
 				const idx = (event.output_index as number) ?? 0;
-				if (this._completedToolCallIndices.has(idx)) { return; }
+				if (this.hasCompletedToolCall(idx)) { return; }
 
 				const callId = this.getCallId(item);
 				const name = typeof item.name === "string" ? item.name : "";
 				const args = typeof item.arguments === "string" ? item.arguments : "";
 
-				const buf = this._toolCallBuffers.get(idx) ?? { args: "" };
+				const buf = this.getOrCreateToolCallBuffer(idx);
 				if (!buf.id && callId) { buf.id = callId; }
 				if (!buf.name && name) { buf.name = name; }
 				if (args) { buf.args = args; }
-				this._toolCallBuffers.set(idx, buf);
+				this.setToolCallBuffer(idx, buf);
 
 				await this.tryEmitBufferedToolCall(idx, progress);
 				if (eventType === "response.output_item.done") {
@@ -460,8 +515,7 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 			this.reportEndThinking(progress);
 			const res = this.processTextContent(text, progress);
 			if (res.emittedAny) {
-				this._hasEmittedAssistantText = true;
-				this._hasEmittedText = true;
+				this.markAssistantTextEmitted();
 			}
 		}
 	}

@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────────
-// Anthropic Messages API adapter (stub — to be filled)
+// Anthropic Messages API adapter
 // ──────────────────────────────────────────────────────────────
 import * as vscode from "vscode";
 import {
@@ -10,61 +10,64 @@ import {
 	ProvideLanguageModelChatResponseOptions,
 } from "vscode";
 
-import type { ModelItem } from "../types";
-import { BaseAdapter, type PreparedRequest, type StreamResult } from "./base";
+import type { AnthropicModelItem, ModelItem } from "../types";
+import { BaseAdapter, type ConvertedMessages, type PreparedRequest, type StreamResult } from "./base";
 import {
-	mapRole, isImageMimeType, createDataUrl,
-	isToolResultPart, collectToolResultText,
+	normalizeChatMessage,
 } from "../utils/helpers";
 import { convertToolsToOpenAI } from "../utils/toolConverter";
+
+interface AnthropicMessage {
+	role: "user" | "assistant";
+	content: string;
+}
 
 export class AnthropicAdapter extends BaseAdapter {
 	convertMessages(
 		messages: readonly LanguageModelChatRequestMessage[],
 		modelConfig: { includeReasoningInRequest: boolean }
-	): unknown[] {
-		// TODO: Full Anthropic message conversion
-		// For now, basic conversion similar to OpenAI
-		const out: unknown[] = [];
+	): ConvertedMessages<AnthropicMessage> {
+		const out: AnthropicMessage[] = [];
+		let systemContent: string | undefined;
 		for (const m of messages) {
-			const role = mapRole(m);
-			const textParts: string[] = [];
-			for (const part of m.content ?? []) {
-				if (part instanceof vscode.LanguageModelTextPart) {
-					textParts.push(part.value);
-				}
-			}
-			const joinedText = textParts.join("").trim();
-			if (role === "system" && joinedText) {
-				this._systemContent = joinedText;
+			const normalized = normalizeChatMessage(m, {
+				includeReasoningInRequest: modelConfig.includeReasoningInRequest,
+			});
+			if (normalized.role === "system" && normalized.joinedText) {
+				systemContent = normalized.joinedText;
 				continue;
 			}
-			if (joinedText) {
-				out.push({ role: role === "system" ? "user" : role, content: joinedText });
+			if (normalized.joinedText) {
+				out.push({
+					role: normalized.role === "system" ? "user" : normalized.role,
+					content: normalized.joinedText,
+				});
 			}
 		}
-		return out;
+		return { messages: out, systemContent };
 	}
 
 	buildRequest(
 		model: ModelItem,
 		baseUrl: string,
 		apiKey: string,
-		messages: unknown[],
+		converted: ConvertedMessages<AnthropicMessage>,
 		options?: ProvideLanguageModelChatResponseOptions
 	): PreparedRequest {
+		const anthropicModel = model as AnthropicModelItem;
+		const { messages, systemContent } = converted;
 		const body: Record<string, unknown> = {
 			model: model.id,
 			messages,
 			stream: true,
 		};
 
-		if (this._systemContent) {
-			body.system = this._systemContent;
+		if (systemContent) {
+			body.system = systemContent;
 		}
 
 		// Anthropic-native parameters
-		const maxTokens = (model as any).max_tokens;
+		const maxTokens = anthropicModel.max_tokens;
 		if (maxTokens !== undefined) {
 			body.max_tokens = maxTokens;
 		} else {
@@ -78,10 +81,10 @@ export class AnthropicAdapter extends BaseAdapter {
 			body.top_p = model.top_p;
 		}
 
-		const topK = (model as any).top_k;
+		const topK = anthropicModel.top_k;
 		if (topK !== undefined) { body.top_k = topK; }
 
-		const thinking = (model as any).thinking;
+		const thinking = anthropicModel.thinking;
 		if (thinking && typeof thinking === "object") {
 			body.thinking = thinking;
 		}
@@ -117,36 +120,14 @@ export class AnthropicAdapter extends BaseAdapter {
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<StreamResult> {
-		const reader = responseBody.getReader();
-		const decoder = new TextDecoder();
-		let buffer = "";
-
 		try {
-			while (true) {
-				if (token.isCancellationRequested) { break; }
-				const { done, value } = await reader.read();
-				if (done) { break; }
-
-				buffer += decoder.decode(value, { stream: true });
-				const lines = buffer.split("\n");
-				buffer = lines.pop() || "";
-
-				for (const line of lines) {
-					if (!line.startsWith("data:")) { continue; }
-					const data = line.slice(5).trim();
-					if (data === "[DONE]") { continue; }
-
-					try {
-						const parsed = JSON.parse(data) as Record<string, unknown>;
-						this.processAnthropicEvent(parsed, progress);
-					} catch { /* ignore */ }
-				}
-			}
-		} catch (error) {
-			this.markStreamInterruptedDuringThinking();
-			throw error;
+			await this.processSseStream(responseBody, token, async (data) => {
+				try {
+					const parsed = JSON.parse(data) as Record<string, unknown>;
+					this.processAnthropicEvent(parsed, progress);
+				} catch { /* ignore */ }
+			});
 		} finally {
-			reader.releaseLock();
 			this.reportEndThinking(progress);
 		}
 		return {};
@@ -166,15 +147,15 @@ export class AnthropicAdapter extends BaseAdapter {
 				if (delta.type === "text_delta" && typeof delta.text === "string") {
 					this.reportEndThinking(progress);
 					const res = this.processTextContent(delta.text, progress);
-					if (res.emittedAny) { this._hasEmittedAssistantText = true; }
+					if (res.emittedAny) { this.markAssistantTextEmitted(); }
 				} else if (delta.type === "thinking_delta" && typeof delta.thinking === "string") {
 					this.bufferThinkingContent(delta.thinking, progress);
 				} else if (delta.type === "input_json_delta" && typeof delta.partial_json === "string") {
 					// Tool call argument streaming
 					const idx = (event.index as number) ?? 0;
-					const buf = this._toolCallBuffers.get(idx) ?? { args: "" };
+					const buf = this.getOrCreateToolCallBuffer(idx);
 					buf.args += delta.partial_json;
-					this._toolCallBuffers.set(idx, buf);
+					this.setToolCallBuffer(idx, buf);
 				}
 				return;
 			}
@@ -183,12 +164,9 @@ export class AnthropicAdapter extends BaseAdapter {
 				const block = event.content_block as Record<string, unknown> | undefined;
 				if (block?.type === "tool_use") {
 					this.reportEndThinking(progress);
-					if (!this._emittedBeginToolCallsHint && this._hasEmittedAssistantText) {
-						progress.report(new vscode.LanguageModelTextPart(" "));
-						this._emittedBeginToolCallsHint = true;
-					}
+					this.emitBeginToolCallsHint(progress);
 					const idx = (event.index as number) ?? 0;
-					this._toolCallBuffers.set(idx, {
+					this.setToolCallBuffer(idx, {
 						id: typeof block.id === "string" ? block.id : undefined,
 						name: typeof block.name === "string" ? block.name : undefined,
 						args: "",

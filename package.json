@@ -558,6 +558,7 @@
 		"bump": "node scripts/bump-version.mjs",
 		"download-api": "dts dev && mv vscode.proposed.*.ts src",
 		"compile": "tsc -p ./",
+		"test:unit": "pnpm run compile && node -r ./out/test/vscodeShim.js --test out/test/**/*.test.js",
 		"bundle": "pnpm exec esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",
 		"lint": "eslint",
 		"format": "prettier --write .",

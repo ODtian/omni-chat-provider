@@ -257,7 +257,6 @@ async function updateExistingProvider(
 	await appendProvider(updatedProvider, fallbackTarget);
 }
 
-// Backward-compatible alias for older internal wiring.
 export async function runProviderSetup(
 	secrets: vscode.SecretStorage
 ): Promise<void> {

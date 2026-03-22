@@ -55,9 +55,44 @@ export interface ModelItem {
 	// ── API-native parameters (pass-through) ──
 	// The model config object may contain any additional properties
 	// that are specific to the selected apiMode (e.g. `max_tokens`,
-	// `thinking`, `maxOutputTokens`, `num_predict`). Adapters read
-	// these directly via `(model as any).fieldName`.
+	// `thinking`, `maxOutputTokens`, `num_predict`). Adapters should
+	// prefer typed sub-interfaces where possible.
 	[key: string]: unknown;
+}
+
+export interface OpenAIModelItem extends ModelItem {
+	max_completion_tokens?: number;
+	max_tokens?: number;
+	reasoning_effort?: string;
+	frequency_penalty?: number;
+	presence_penalty?: number;
+}
+
+export interface OpenAIResponsesModelItem extends ModelItem {
+	max_output_tokens?: number;
+	reasoning?: Record<string, unknown>;
+}
+
+export interface AnthropicModelItem extends ModelItem {
+	max_tokens?: number;
+	top_k?: number;
+	thinking?: Record<string, unknown>;
+}
+
+export interface GeminiModelItem extends ModelItem {
+	maxOutputTokens?: number;
+	topK?: number;
+	topP?: number;
+	thinkingConfig?: Record<string, unknown>;
+}
+
+export interface OllamaModelItem extends ModelItem {
+	num_predict?: number;
+	num_ctx?: number;
+	num_gpu?: number;
+	top_k?: number;
+	min_p?: number;
+	repeat_penalty?: number;
 }
 
 /** Retry configuration. */
@@ -79,6 +114,14 @@ export interface RetryAttemptInfo {
 	error: Error;
 	nextRetryAt: Date;
 	reason: "timeout" | "empty-response" | "http-status" | "network" | "other";
+}
+
+export interface RetryErrorClassification {
+	reason: RetryAttemptInfo["reason"];
+	isRetryableStatus: boolean;
+	isRetryableNetwork: boolean;
+	isTimeout: boolean;
+	isEmptyResponse: boolean;
 }
 
 /** System prompt interception mode. */

@@ -1,7 +1,8 @@
 import { execFile as execFileCallback } from "child_process";
 import { promisify } from "util";
 import * as vscode from "vscode";
-import { buildScopedModelId, Config, findConfiguredModelById } from "../config";
+import { buildScopedModelId, Config, findConfiguredModelById, isInternalProviderModel } from "../config";
+import { getModelInputTokenBudget } from "../modelParams";
 import type { ModelItem } from "../types";
 import { countTokensForInput } from "./tokenCounter";
 import { ApiKeyManager } from "./apiKeyManager";
@@ -132,7 +133,7 @@ export class CommitMessageService implements vscode.Disposable {
 
 	async selectCommitMessageModel(): Promise<void> {
 		const models = Config.getModels()
-			.filter((model) => !model.id.startsWith("__provider__"))
+			.filter((model) => !isInternalProviderModel(model))
 			.map((model) => {
 				const scopedId = buildScopedModelId(model);
 				return {
@@ -335,10 +336,7 @@ export class CommitMessageService implements vscode.Disposable {
 			wasTruncated = true;
 		}
 
-		const maxInputBudget = Math.max(
-			2048,
-			(model.context_length ?? 128000) - ((model as any).max_completion_tokens ?? (model as any).max_output_tokens ?? (model as any).max_tokens ?? 4096) - COMMIT_PROMPT_TOKEN_HEADROOM
-		);
+		const maxInputBudget = Math.max(2048, getModelInputTokenBudget(model, COMMIT_PROMPT_TOKEN_HEADROOM));
 
 		const tokenSource = new vscode.CancellationTokenSource();
 		try {

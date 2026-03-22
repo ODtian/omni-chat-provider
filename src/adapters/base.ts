@@ -14,6 +14,7 @@ import {
 import type { ModelItem } from "../types";
 import { tryParseJSON } from "../utils/helpers";
 import { Config } from "../config";
+import { RetryableHttpError } from "../services/retryService";
 
 /**
  * Result returned after processing a streaming response.
@@ -32,6 +33,111 @@ export interface PreparedRequest {
 	body: unknown;
 }
 
+export interface AdapterContextScope {
+	requestInitiator?: string;
+	modelId?: string;
+	conversationKey?: string;
+}
+
+export interface ConvertedMessages<TMessage = unknown> {
+	messages: TMessage[];
+	systemContent?: string;
+}
+
+type StreamLineHandler = (line: string) => void | Promise<void>;
+
+type ToolCallBuffer = { id?: string; name?: string; args: string };
+
+class ToolCallState {
+	readonly buffers = new Map<number, ToolCallBuffer>();
+	readonly completedIndices = new Set<number>();
+	hasEmittedAssistantText = false;
+	hasEmittedText = false;
+	emittedBeginToolCallsHint = false;
+
+	hasCompleted(index: number): boolean {
+		return this.completedIndices.has(index);
+	}
+
+	getOrCreateBuffer(index: number): ToolCallBuffer {
+		return this.buffers.get(index) ?? { args: "" };
+	}
+
+	setBuffer(index: number, buffer: ToolCallBuffer): void {
+		this.buffers.set(index, buffer);
+	}
+
+	markCompleted(index: number): void {
+		this.completedIndices.add(index);
+	}
+}
+
+class ThinkingState {
+	hasEmittedThinking = false;
+	currentId: string | null = null;
+	buffer = "";
+	flushTimer: NodeJS.Timeout | null = null;
+	lastStreamInterruptedDuringThinking = false;
+
+	ensureSession(): string {
+		this.hasEmittedThinking = true;
+		if (!this.currentId) {
+			this.currentId = `thinking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+		}
+		return this.currentId;
+	}
+
+	appendBuffer(text: string): void {
+		this.buffer += text;
+	}
+
+	hasBuffer(): boolean {
+		return this.buffer.length > 0;
+	}
+
+	clearBuffer(): void {
+		this.buffer = "";
+	}
+
+	hasFlushTimer(): boolean {
+		return !!this.flushTimer;
+	}
+
+	scheduleFlush(callback: () => void, delayMs: number): void {
+		this.flushTimer = setTimeout(callback, delayMs);
+	}
+
+	clearFlushTimer(): void {
+		if (this.flushTimer) {
+			clearTimeout(this.flushTimer);
+			this.flushTimer = null;
+		}
+	}
+
+	reset(): void {
+		this.currentId = null;
+		this.clearBuffer();
+		this.clearFlushTimer();
+	}
+
+	hasActive(): boolean {
+		return !!this.currentId;
+	}
+
+	markInterrupted(): void {
+		this.lastStreamInterruptedDuringThinking = true;
+	}
+}
+
+class XmlThinkState {
+	active = false;
+	detectionAttempted = false;
+
+	markDetectionAttempted(): void {
+		this.detectionAttempted = true;
+	}
+}
+
 /**
  * Base class for all API adapters.
  *
@@ -39,33 +145,16 @@ export interface PreparedRequest {
  * and SSE stream processing for a specific API format.
  */
 export abstract class BaseAdapter {
-	// ── Tool call buffering ──
-	protected _toolCallBuffers = new Map<number, { id?: string; name?: string; args: string }>();
-	protected _completedToolCallIndices = new Set<number>();
-	protected _hasEmittedAssistantText = false;
-	protected _hasEmittedText = false;
-	protected _emittedBeginToolCallsHint = false;
-
-	// ── Thinking state ──
-	protected _hasEmittedThinking = false;
-	protected _currentThinkingId: string | null = null;
-	protected _thinkingBuffer = "";
-	protected _thinkingFlushTimer: NodeJS.Timeout | null = null;
-	protected _lastStreamInterruptedDuringThinking = false;
-
-	// ── XML think block parsing ──
-	protected _xmlThinkActive = false;
-	protected _xmlThinkDetectionAttempted = false;
-
-	// ── System content extracted from messages ──
-	protected _systemContent: string | undefined;
+	private readonly _toolCallState = new ToolCallState();
+	private readonly _thinkingState = new ThinkingState();
+	private readonly _xmlThinkState = new XmlThinkState();
 
 	/**
 	 * Returns true if any text, thinking, or tool call has been emitted.
 	 * Used to determine if the response was completely empty.
 	 */
 	public get hasEmittedAnyContent(): boolean {
-		return this._hasEmittedText || this._hasEmittedThinking || this._completedToolCallIndices.size > 0;
+		return this._toolCallState.hasEmittedText || this._thinkingState.hasEmittedThinking || this._toolCallState.completedIndices.size > 0;
 	}
 
 	/**
@@ -73,11 +162,115 @@ export abstract class BaseAdapter {
 	 * Thinking-only output should still be considered retryable empty output.
 	 */
 	public get hasEmittedResponseContent(): boolean {
-		return this._hasEmittedText || this._completedToolCallIndices.size > 0;
+		return this._toolCallState.hasEmittedText || this._toolCallState.completedIndices.size > 0;
 	}
 
 	public get lastStreamInterruptedDuringThinking(): boolean {
-		return this._lastStreamInterruptedDuringThinking;
+		return this._thinkingState.lastStreamInterruptedDuringThinking;
+	}
+
+	protected hasCompletedToolCall(index: number): boolean {
+		return this._toolCallState.hasCompleted(index);
+	}
+
+	protected getOrCreateToolCallBuffer(index: number): ToolCallBuffer {
+		return this._toolCallState.getOrCreateBuffer(index);
+	}
+
+	protected setToolCallBuffer(index: number, buffer: ToolCallBuffer): void {
+		this._toolCallState.setBuffer(index, buffer);
+	}
+
+	protected markToolCallCompleted(index: number): void {
+		this._toolCallState.markCompleted(index);
+	}
+
+	protected markAssistantTextEmitted(): void {
+		this._toolCallState.hasEmittedAssistantText = true;
+	}
+
+	protected shouldEmitBeginToolCallsHint(): boolean {
+		return !this._toolCallState.emittedBeginToolCallsHint && this._toolCallState.hasEmittedAssistantText;
+	}
+
+	protected emitBeginToolCallsHint(progress: Progress<LanguageModelResponsePart2>): void {
+		if (!this.shouldEmitBeginToolCallsHint()) {
+			return;
+		}
+
+		progress.report(new LanguageModelTextPart(" "));
+		this._toolCallState.emittedBeginToolCallsHint = true;
+	}
+
+	protected markThinkingEmitted(value: boolean): void {
+		this._thinkingState.hasEmittedThinking = value;
+	}
+
+	protected hasThinkingEmitted(): boolean {
+		return this._thinkingState.hasEmittedThinking;
+	}
+
+	protected ensureThinkingSession(): string {
+		return this._thinkingState.ensureSession();
+	}
+
+	protected appendThinkingBuffer(text: string): void {
+		this._thinkingState.appendBuffer(text);
+	}
+
+	protected hasThinkingBuffer(): boolean {
+		return this._thinkingState.hasBuffer();
+	}
+
+	protected getThinkingBuffer(): string {
+		return this._thinkingState.buffer;
+	}
+
+	protected clearThinkingBuffer(): void {
+		this._thinkingState.clearBuffer();
+	}
+
+	protected hasThinkingFlushTimer(): boolean {
+		return this._thinkingState.hasFlushTimer();
+	}
+
+	protected scheduleThinkingFlush(
+		callback: () => void,
+		delayMs: number
+	): void {
+		this._thinkingState.scheduleFlush(callback, delayMs);
+	}
+
+	protected clearThinkingFlushTimer(): void {
+		this._thinkingState.clearFlushTimer();
+	}
+
+	protected resetThinkingState(): void {
+		this._thinkingState.reset();
+	}
+
+	protected hasActiveThinking(): boolean {
+		return this._thinkingState.hasActive();
+	}
+
+	protected markStreamInterruptedDuringThinkingState(): void {
+		this._thinkingState.markInterrupted();
+	}
+
+	protected isXmlThinkActive(): boolean {
+		return this._xmlThinkState.active;
+	}
+
+	protected setXmlThinkActive(value: boolean): void {
+		this._xmlThinkState.active = value;
+	}
+
+	protected hasAttemptedXmlThinkDetection(): boolean {
+		return this._xmlThinkState.detectionAttempted;
+	}
+
+	protected markXmlThinkDetectionAttempted(): void {
+		this._xmlThinkState.markDetectionAttempted();
 	}
 
 	/**
@@ -86,7 +279,7 @@ export abstract class BaseAdapter {
 	abstract convertMessages(
 		messages: readonly LanguageModelChatRequestMessage[],
 		modelConfig: { includeReasoningInRequest: boolean }
-	): unknown[];
+	): ConvertedMessages;
 
 	/**
 	 * Build the complete request (url + headers + body) for this API.
@@ -95,7 +288,7 @@ export abstract class BaseAdapter {
 		model: ModelItem,
 		baseUrl: string,
 		apiKey: string,
-		messages: unknown[],
+		converted: ConvertedMessages,
 		options?: ProvideLanguageModelChatResponseOptions
 	): PreparedRequest;
 
@@ -108,13 +301,84 @@ export abstract class BaseAdapter {
 		token: CancellationToken
 	): Promise<StreamResult>;
 
+	prepareRequestScope(_scope: AdapterContextScope): void {
+		// default no-op
+	}
+
+	handleRequestError(_error: unknown): { retryWithFreshRequest: boolean } {
+		return { retryWithFreshRequest: false };
+	}
+
+	commitStreamResult(_result: StreamResult): void {
+		// default no-op
+	}
+
+	protected isInvalidPreviousResponseError(error: unknown): boolean {
+		if (!(error instanceof RetryableHttpError)) {
+			return false;
+		}
+
+		if (![400, 404].includes(error.statusCode)) {
+			return false;
+		}
+
+		const message = error.message.toLowerCase();
+		return [
+			"previous_response_id",
+			"previous response",
+			"not found",
+			"expired",
+			"invalid",
+		].some((keyword) => message.includes(keyword));
+	}
+
+	protected async processSseStream(
+		body: ReadableStream<Uint8Array>,
+		token: CancellationToken,
+		onData: StreamLineHandler,
+		onDone?: () => void | Promise<void>
+	): Promise<void> {
+		await this.processDelimitedStream(body, token, "\n", async (line) => {
+			if (!line.startsWith("data:")) {
+				return;
+			}
+
+			const data = line.slice(5).trim();
+			if (data === "[DONE]") {
+				await onDone?.();
+				return;
+			}
+
+			if (!data) {
+				return;
+			}
+
+			await onData(data);
+		});
+	}
+
+	protected async processJsonlStream(
+		body: ReadableStream<Uint8Array>,
+		token: CancellationToken,
+		onLine: StreamLineHandler
+	): Promise<void> {
+		await this.processDelimitedStream(body, token, "\n", async (line) => {
+			const trimmed = line.trim();
+			if (!trimmed) {
+				return;
+			}
+
+			await onLine(trimmed);
+		});
+	}
+
 	// ── Shared tool call logic ──
 
 	protected async tryEmitBufferedToolCall(
 		index: number,
 		progress: Progress<LanguageModelResponsePart2>
 	): Promise<void> {
-		const buf = this._toolCallBuffers.get(index);
+		const buf = this._toolCallState.buffers.get(index);
 		if (!buf?.name) {
 			return;
 		}
@@ -125,18 +389,18 @@ export abstract class BaseAdapter {
 		const id = buf.id ?? `call_${Math.random().toString(36).slice(2, 10)}`;
 		const parameters = this.adjustReadFileParameters(buf.name, parsed.value);
 		progress.report(new LanguageModelToolCallPart(id, buf.name, parameters));
-		this._toolCallBuffers.delete(index);
-		this._completedToolCallIndices.add(index);
+		this._toolCallState.buffers.delete(index);
+		this.markToolCallCompleted(index);
 	}
 
 	protected async flushToolCallBuffers(
 		progress: Progress<LanguageModelResponsePart2>,
 		throwOnInvalid: boolean
 	): Promise<void> {
-		if (this._toolCallBuffers.size === 0) {
+		if (this._toolCallState.buffers.size === 0) {
 			return;
 		}
-		for (const [idx, buf] of Array.from(this._toolCallBuffers.entries())) {
+		for (const [idx, buf] of Array.from(this._toolCallState.buffers.entries())) {
 			const argsText = buf.args.trim() || "{}";
 			const parsed = tryParseJSON(argsText);
 			if (!parsed.ok) {
@@ -149,8 +413,8 @@ export abstract class BaseAdapter {
 			const name = buf.name ?? "unknown_tool";
 			const parameters = this.adjustReadFileParameters(name, parsed.value);
 			progress.report(new LanguageModelToolCallPart(id, name, parameters));
-			this._toolCallBuffers.delete(idx);
-			this._completedToolCallIndices.add(idx);
+			this._toolCallState.buffers.delete(idx);
+			this.markToolCallCompleted(idx);
 		}
 	}
 
@@ -160,51 +424,41 @@ export abstract class BaseAdapter {
 		text: string,
 		progress: Progress<LanguageModelResponsePart2>
 	): void {
-		this._hasEmittedThinking = true;
-		if (!this._currentThinkingId) {
-			this._currentThinkingId = `thinking_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		}
-		this._thinkingBuffer += text;
-		if (!this._thinkingFlushTimer) {
-			this._thinkingFlushTimer = setTimeout(() => {
+		this.ensureThinkingSession();
+		this.appendThinkingBuffer(text);
+		if (!this.hasThinkingFlushTimer()) {
+			this.scheduleThinkingFlush(() => {
 				this.flushThinkingBuffer(progress);
 			}, 100);
 		}
 	}
 
 	protected flushThinkingBuffer(progress: Progress<LanguageModelResponsePart2>): void {
-		if (this._thinkingFlushTimer) {
-			clearTimeout(this._thinkingFlushTimer);
-			this._thinkingFlushTimer = null;
-		}
-		if (this._thinkingBuffer && this._currentThinkingId) {
-			const text = this._thinkingBuffer;
-			this._thinkingBuffer = "";
-			progress.report(new LanguageModelThinkingPart(text, this._currentThinkingId));
+		this.clearThinkingFlushTimer();
+		if (this.hasThinkingBuffer() && this._thinkingState.currentId) {
+			const text = this.getThinkingBuffer();
+			this.clearThinkingBuffer();
+			progress.report(new LanguageModelThinkingPart(text, this._thinkingState.currentId));
 		}
 	}
 
 	protected reportEndThinking(progress: Progress<LanguageModelResponsePart2>): void {
-		if (!this._currentThinkingId) {
+		if (!this.hasActiveThinking()) {
 			return;
 		}
+		const thinkingId = this._thinkingState.currentId ?? undefined;
 		try {
 			this.flushThinkingBuffer(progress);
-			progress.report(new LanguageModelThinkingPart("", this._currentThinkingId));
+			progress.report(new LanguageModelThinkingPart("", thinkingId));
 		} catch (e) {
 			console.error("[OmniChat] Failed to end thinking:", e);
 		}
-		this._currentThinkingId = null;
-		this._thinkingBuffer = "";
-		if (this._thinkingFlushTimer) {
-			clearTimeout(this._thinkingFlushTimer);
-			this._thinkingFlushTimer = null;
-		}
+		this.resetThinkingState();
 	}
 
 	protected markStreamInterruptedDuringThinking(): void {
-		if (this._currentThinkingId || this._thinkingBuffer.length > 0 || this._xmlThinkActive) {
-			this._lastStreamInterruptedDuringThinking = true;
+		if (this.hasActiveThinking() || this.hasThinkingBuffer() || this.isXmlThinkActive()) {
+			this.markStreamInterruptedDuringThinkingState();
 		}
 	}
 
@@ -215,7 +469,7 @@ export abstract class BaseAdapter {
 		progress: Progress<LanguageModelResponsePart2>
 	): { emittedAny: boolean } {
 		if (input.length > 0) {
-			this._hasEmittedText = true;
+			this._toolCallState.hasEmittedText = true;
 			progress.report(new LanguageModelTextPart(input));
 			return { emittedAny: true };
 		}
@@ -226,7 +480,7 @@ export abstract class BaseAdapter {
 		input: string,
 		progress: Progress<LanguageModelResponsePart2>
 	): { emittedAny: boolean } {
-		if (this._xmlThinkDetectionAttempted && !this._xmlThinkActive) {
+		if (this.hasAttemptedXmlThinkDetection() && !this.isXmlThinkActive()) {
 			return { emittedAny: false };
 		}
 
@@ -236,14 +490,14 @@ export abstract class BaseAdapter {
 		let emittedAny = false;
 
 		while (data.length > 0) {
-			if (!this._xmlThinkActive) {
+			if (!this.isXmlThinkActive()) {
 				const startIdx = data.indexOf(THINK_START);
 				if (startIdx === -1) {
-					this._xmlThinkDetectionAttempted = true;
+					this.markXmlThinkDetectionAttempted();
 					break;
 				}
 				emittedAny = true;
-				this._xmlThinkActive = true;
+				this.setXmlThinkActive(true);
 				data = data.slice(startIdx + THINK_START.length);
 				continue;
 			}
@@ -257,7 +511,7 @@ export abstract class BaseAdapter {
 
 			this.bufferThinkingContent(data.slice(0, endIdx), progress);
 			emittedAny = true;
-			this._xmlThinkActive = false;
+			this.setXmlThinkActive(false);
 			data = data.slice(endIdx + THINK_END.length);
 		}
 
@@ -283,6 +537,43 @@ export abstract class BaseAdapter {
 			return { ...parameters, endLine: startLine + defaultLines };
 		}
 		return parameters;
+	}
+
+	private async processDelimitedStream(
+		body: ReadableStream<Uint8Array>,
+		token: CancellationToken,
+		delimiter: string,
+		onLine: StreamLineHandler
+	): Promise<void> {
+		const reader = body.getReader();
+		const decoder = new TextDecoder();
+		let buffer = "";
+
+		try {
+			while (true) {
+				if (token.isCancellationRequested) {
+					break;
+				}
+
+				const { done, value } = await reader.read();
+				if (done) {
+					break;
+				}
+
+				buffer += decoder.decode(value, { stream: true });
+				const lines = buffer.split(delimiter);
+				buffer = lines.pop() || "";
+
+				for (const line of lines) {
+					await onLine(line);
+				}
+			}
+		} catch (error) {
+			this.markStreamInterruptedDuringThinking();
+			throw error;
+		} finally {
+			reader.releaseLock();
+		}
 	}
 
 	/**

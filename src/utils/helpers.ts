@@ -95,6 +95,99 @@ export function collectToolResultText(
 	return text;
 }
 
+export interface NormalizedToolCall {
+	id: string;
+	name: string;
+	arguments: string;
+}
+
+export interface NormalizedToolResult {
+	callId: string;
+	content: string;
+}
+
+export interface NormalizedThinkingPart {
+	text: string;
+	metadata?: { type?: string; thoughtSignature?: string };
+}
+
+export interface NormalizedChatMessage {
+	role: "user" | "assistant" | "system";
+	textParts: string[];
+	joinedText: string;
+	imageParts: vscode.LanguageModelDataPart[];
+	toolCalls: NormalizedToolCall[];
+	toolResults: NormalizedToolResult[];
+	thinkingParts: NormalizedThinkingPart[];
+	joinedThinking: string;
+}
+
+export function normalizeChatMessage(
+	message: vscode.LanguageModelChatRequestMessage,
+	options?: { includeReasoningInRequest?: boolean }
+): NormalizedChatMessage {
+	const role = mapRole(message);
+	const textParts: string[] = [];
+	const imageParts: vscode.LanguageModelDataPart[] = [];
+	const toolCalls: NormalizedToolCall[] = [];
+	const toolResults: NormalizedToolResult[] = [];
+	const thinkingParts: NormalizedThinkingPart[] = [];
+
+	for (const part of message.content ?? []) {
+		if (part instanceof vscode.LanguageModelTextPart) {
+			textParts.push(part.value);
+			continue;
+		}
+
+		if (part instanceof vscode.LanguageModelDataPart && isImageMimeType(part.mimeType)) {
+			imageParts.push(part);
+			continue;
+		}
+
+		if (part instanceof vscode.LanguageModelToolCallPart) {
+			const id = part.callId || `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+			let args = "{}";
+			try {
+				args = JSON.stringify(part.input ?? {});
+			} catch {
+				args = "{}";
+			}
+			toolCalls.push({ id, name: part.name, arguments: args });
+			continue;
+		}
+
+		if (isToolResultPart(part)) {
+			toolResults.push({
+				callId: (part as { callId?: string }).callId ?? "",
+				content: collectToolResultText(part as { content?: ReadonlyArray<unknown> }),
+			});
+			continue;
+		}
+
+		if (
+			part instanceof vscode.LanguageModelThinkingPart &&
+			options?.includeReasoningInRequest &&
+			(part.metadata as { type?: string } | undefined)?.type !== "retry_notice"
+		) {
+			thinkingParts.push({
+				text: Array.isArray(part.value) ? part.value.join("") : part.value,
+				metadata: part.metadata as { type?: string; thoughtSignature?: string } | undefined,
+			});
+		}
+	}
+
+	return {
+		role,
+		textParts,
+		joinedText: textParts.join("").trim(),
+		imageParts,
+		toolCalls,
+		toolResults,
+		thinkingParts,
+		joinedThinking: thinkingParts.map((part) => part.text).join("").trim(),
+	};
+}
+
 /**
  * Show an input box with a toggleable password visibility button.
  */

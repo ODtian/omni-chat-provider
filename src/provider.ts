@@ -10,10 +10,24 @@ import {
 } from "vscode";
 
 import type { ApiMode, ModelItem } from "./types";
-import { buildScopedModelId, Config, findConfiguredModelById, parseScopedModelId } from "./config";
+import {
+	buildScopedModelId,
+	Config,
+	findConfiguredModelById,
+	isInternalProviderModel,
+	parseScopedModelId,
+} from "./config";
 import { ApiKeyManager } from "./services/apiKeyManager";
-import { executeWithRetry } from "./services/retryService";
+import {
+	EmptyResponseRetryError,
+	createNetworkRetryError,
+	executeWithRetry,
+	RETRY_REASON_LABELS,
+	RetryableHttpError,
+	shouldRetryRequest,
+} from "./services/retryService";
 import { interceptSystemPrompt } from "./prompt/interceptor";
+import { DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS, getModelMaxOutputTokens } from "./modelParams";
 import { countTokensForInput } from "./services/tokenCounter";
 
 import { BaseAdapter } from "./adapters/base";
@@ -23,15 +37,36 @@ import { AnthropicAdapter } from "./adapters/anthropic";
 import { GeminiAdapter } from "./adapters/gemini";
 import { OllamaAdapter } from "./adapters/ollama";
 
-const DEFAULT_CONTEXT_LENGTH = 128000;
-const DEFAULT_MAX_TOKENS = 4096;
 const EXTENSION_LABEL = "OmniChat";
 const OUTPUT_CHANNEL = vscode.window.createOutputChannel("OmniChat");
 const MAX_VISIBLE_ERROR_LENGTH = 220;
 
-interface ProviderGroupConfiguration {
-	providerId?: string;
+type SafeProgressReporter = Progress<LanguageModelResponsePart2>;
+
+interface RetryNoticeState {
+	activeId?: string;
+	count: number;
 }
+
+interface ResolvedRequestContext {
+	resolvedModel: ModelItem;
+	apiKey: string;
+	baseUrl: string;
+	apiMode: ApiMode;
+	interceptedMessages: readonly LanguageModelChatRequestMessage[];
+	modelConfig: { includeReasoningInRequest: boolean };
+	retryConfig: ReturnType<typeof Config.getRetryConfig>;
+}
+
+interface ProviderChatInformationOptions {
+	silent?: boolean;
+	configuration?: Record<string, unknown>;
+	group?: string;
+}
+
+type ProviderGroupConfiguration = {
+	providerId?: string;
+};
 
 /**
  * Single OmniChat vendor provider.
@@ -52,12 +87,12 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	}
 
 	async provideLanguageModelChatInformation(
-		options: { silent?: boolean; configuration?: Record<string, any> },
+		options: ProviderChatInformationOptions,
 		_token: CancellationToken
 	): Promise<LanguageModelChatInformation[]> {
 		const groupConfig = this.parseGroupConfiguration(options.configuration);
-		const groupName = typeof (options as any).group === "string"
-			? (options as any).group
+		const groupName = typeof options.group === "string"
+			? options.group
 			: undefined;
 		if (!groupConfig.providerId) {
 			return [];
@@ -74,7 +109,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		return this.getScopedModels(groupConfig.providerId, groupName);
 	}
 
-	private parseGroupConfiguration(configuration?: Record<string, any>): ProviderGroupConfiguration {
+	private parseGroupConfiguration(configuration?: Record<string, unknown>): ProviderGroupConfiguration {
 		const providerId = typeof configuration?.providerId === "string"
 			? configuration.providerId.trim()
 			: "";
@@ -89,10 +124,10 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		const detailLabel = groupLabel?.trim() || providerId;
 
 		return models
-			.filter((model) => !model.id.startsWith("__provider__"))
+			.filter((model) => !isInternalProviderModel(model))
 			.map((model) => {
 				const contextLen = model.context_length ?? DEFAULT_CONTEXT_LENGTH;
-				const maxOutput = this.getMaxOutputTokens(model) ?? DEFAULT_MAX_TOKENS;
+				const maxOutput = getModelMaxOutputTokens(model) ?? DEFAULT_MAX_OUTPUT_TOKENS;
 				const maxInput = Math.max(1, contextLen - maxOutput);
 				const modelId = buildScopedModelId(model);
 				const fallbackName = model.configId ? `${model.id}::${model.configId}` : model.id;
@@ -146,7 +181,28 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		progress: Progress<LanguageModelResponsePart2>,
 		token: CancellationToken
 	): Promise<void> {
-		const safeProgress: Progress<LanguageModelResponsePart2> = {
+		const safeProgress = this.createSafeProgress(progress);
+		const retryNoticeState: RetryNoticeState = { count: 0 };
+
+		try {
+			const requestContext = await this.resolveRequestContext(model, messages);
+			await this.executeChatRequest(
+				requestContext,
+				options,
+				safeProgress,
+				token,
+				retryNoticeState
+			);
+		} catch (err) {
+			throw this.createUserVisibleRequestError(model.id, err);
+		} finally {
+			this.closeRetryNotice(safeProgress, retryNoticeState);
+			this._lastRequestTime = Date.now();
+		}
+	}
+
+	private createSafeProgress(progress: Progress<LanguageModelResponsePart2>): SafeProgressReporter {
+		return {
 			report: (part) => {
 				try {
 					progress.report(part);
@@ -155,151 +211,225 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 				}
 			},
 		};
-		let activeRetryNoticeId: string | undefined;
-		const closeRetryNotice = () => {
-			if (!activeRetryNoticeId) {
-				return;
-			}
+	}
 
-			safeProgress.report(new vscode.LanguageModelThinkingPart("", activeRetryNoticeId));
-			activeRetryNoticeId = undefined;
-		};
+	private async resolveRequestContext(
+		model: LanguageModelChatInformation,
+		messages: readonly LanguageModelChatRequestMessage[]
+	): Promise<ResolvedRequestContext> {
+		const parsedId = parseScopedModelId(model.id);
+		const resolvedModel = this.findModelConfig(parsedId);
+		if (!resolvedModel) {
+			throw new Error(`Model configuration not found for "${model.id}"`);
+		}
 
-		try {
-			const parsedId = parseScopedModelId(model.id);
-			const resolvedModel = this.findModelConfig(parsedId);
-			if (!resolvedModel) {
-				throw new Error(`Model configuration not found for "${model.id}"`);
-			}
+		await this.applyDelay(resolvedModel);
 
-			await this.applyDelay(resolvedModel);
+		const apiKey = await this.resolveApiKey(parsedId.providerId, resolvedModel);
+		const baseUrl = this.resolveBaseUrl(resolvedModel);
+		const apiMode: ApiMode = resolvedModel.apiMode ?? "openai";
 
-			const useGenericKey = !resolvedModel.baseUrl;
-			const apiKey = await this._keyManager.ensureKey(
-				parsedId.providerId || resolvedModel.owned_by,
-				useGenericKey
-			);
-			if (!apiKey) {
-				throw new Error("API key not found");
-			}
-
-			const baseUrl = resolvedModel.baseUrl || Config.getBaseUrl();
-			if (!baseUrl?.startsWith("http")) {
-				throw new Error("Invalid base URL");
-			}
-
-			const apiMode: ApiMode = resolvedModel.apiMode ?? "openai";
-			const interceptedMessages = interceptSystemPrompt(
+		return {
+			resolvedModel,
+			apiKey,
+			baseUrl,
+			apiMode,
+			interceptedMessages: interceptSystemPrompt(
 				messages,
 				Config.getSystemPromptMode(),
 				Config.getSystemPromptContent()
-			);
-			const modelConfig = {
+			),
+			modelConfig: {
 				includeReasoningInRequest: resolvedModel.include_reasoning_in_request ?? false,
-			};
-			const retryConfig = Config.getRetryConfig();
+			},
+			retryConfig: Config.getRetryConfig(),
+		};
+	}
 
-			let retryNoticeCount = 0;
-			let activeAdapter: BaseAdapter | undefined;
-			await executeWithRetry(async () => {
-				closeRetryNotice();
-				const adapter = this.createAdapter(apiMode);
-				activeAdapter = adapter;
-				const convertedMessages = adapter.convertMessages(interceptedMessages, modelConfig);
-
-				const payload = adapter.buildRequest(
-					resolvedModel,
-					baseUrl,
-					apiKey,
-					convertedMessages,
-					options
-				);
-
-				const res = await fetch(payload.url, {
-					method: "POST",
-					headers: payload.headers,
-					body: JSON.stringify(payload.body),
-				});
-
-				if (!res.ok) {
-					const errorText = await res.text();
-					throw new Error(
-						`API error: [${res.status}] ${res.statusText}${errorText ? `\n${errorText}` : ""}\nURL: ${payload.url}`
-					);
-				}
-
-				if (!res.body) {
-					throw new Error("No response body [EMPTY_RESPONSE]");
-				}
-
-				const result = await adapter.processStream(res.body, safeProgress, token);
-
-				if (retryConfig.retryEmptyResponse && !adapter.hasEmittedResponseContent) {
-					throw new Error("API stream ended without yielding any content [EMPTY_RESPONSE]");
-				}
-
-				// Responses API exposes a response ID, but our DataPart experiments
-				// showed that custom response parts are not fed back into subsequent
-				// provider requests by VS Code/Copilot today. Keep the ID available
-				// for future stateful implementations instead of emitting marker data.
-				void result.responseId;
-			}, retryConfig, async (info) => {
-				if (token.isCancellationRequested) {
-					return;
-				}
-				retryNoticeCount += 1;
-				const nextTimeText = info.nextRetryAt.toLocaleTimeString("zh-CN", {
-					hour12: false,
-					hour: "2-digit",
-					minute: "2-digit",
-					second: "2-digit",
-				});
-				const reasonLabel = info.reason === "empty-response"
-					? "Empty response"
-					: info.reason === "network"
-						? "Network/stream error"
-						: info.reason === "http-status"
-							? "Retryable request error"
-							: info.reason === "timeout"
-								? "Request timeout"
-								: "Request error";
-				const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
-
-				closeRetryNotice();
-				activeRetryNoticeId = `retry_notice_${Date.now()}_${retryNoticeCount}_${Math.random().toString(36).slice(2, 6)}`;
-				safeProgress.report(new vscode.LanguageModelThinkingPart(body, activeRetryNoticeId, {
-					type: "retry_notice",
-					attemptNumber: info.attemptNumber,
-					reason: info.reason,
-					nextRetryAt: info.nextRetryAt.toISOString(),
-				}));
-			}, (_error) => {
-				if (token.isCancellationRequested) {
-					return false;
-				}
-
-				if (activeAdapter?.hasEmittedResponseContent) {
-					console.warn("[OmniChat] Skip retry because partial content has already been emitted.");
-					return false;
-				}
-
-				console.warn("[OmniChat] Allow retry because no response content has been emitted yet.");
-				return undefined;
-			});
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] Request failed for ${model.id}`);
-			OUTPUT_CHANNEL.appendLine(message);
-			OUTPUT_CHANNEL.appendLine("");
-			console.error("[OmniChat] Request failed", {
-				modelId: model.id,
-				error: message,
-			});
-			throw new Error(truncateErrorForUser(message));
-		} finally {
-			closeRetryNotice();
-			this._lastRequestTime = Date.now();
+	private async resolveApiKey(providerId: string, resolvedModel: ModelItem): Promise<string> {
+		const useGenericKey = !resolvedModel.baseUrl;
+		const apiKey = await this._keyManager.ensureKey(
+			providerId || resolvedModel.owned_by,
+			useGenericKey
+		);
+		if (!apiKey) {
+			throw new Error("API key not found");
 		}
+		return apiKey;
+	}
+
+	private resolveBaseUrl(resolvedModel: ModelItem): string {
+		const baseUrl = resolvedModel.baseUrl || Config.getBaseUrl();
+		if (!baseUrl?.startsWith("http")) {
+			throw new Error("Invalid base URL");
+		}
+		return baseUrl;
+	}
+
+	private async executeChatRequest(
+		context: ResolvedRequestContext,
+		options: ProvideLanguageModelChatResponseOptions,
+		progress: SafeProgressReporter,
+		token: CancellationToken,
+		retryNoticeState: RetryNoticeState
+	): Promise<void> {
+		let activeAdapter: BaseAdapter | undefined;
+
+		await executeWithRetry(async () => {
+			activeAdapter = await this.executeSingleRequest(context, options, progress, token);
+		}, context.retryConfig, async (info) => {
+			if (token.isCancellationRequested) {
+				return;
+			}
+			this.reportRetryNotice(info, progress, retryNoticeState);
+		}, (error) => {
+			return shouldRetryRequest({
+				error,
+				tokenCancelled: token.isCancellationRequested,
+				hasEmittedResponseContent: activeAdapter?.hasEmittedResponseContent ?? false,
+			});
+		});
+	}
+
+	private async executeSingleRequest(
+		context: ResolvedRequestContext,
+		options: ProvideLanguageModelChatResponseOptions,
+		progress: SafeProgressReporter,
+		token: CancellationToken
+	): Promise<BaseAdapter> {
+		const adapter = this.createAdapter(context.apiMode);
+		const conversationKey = this.createConversationKey(context.interceptedMessages);
+		adapter.prepareRequestScope({
+			requestInitiator: options.requestInitiator,
+			modelId: buildScopedModelId(context.resolvedModel),
+			conversationKey,
+		});
+
+		const convertedMessages = adapter.convertMessages(context.interceptedMessages, context.modelConfig);
+		let payload = adapter.buildRequest(
+			context.resolvedModel,
+			context.baseUrl,
+			context.apiKey,
+			convertedMessages,
+			options
+		);
+
+		let response: Response;
+		try {
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body);
+		} catch (error) {
+			if (!adapter.handleRequestError(error).retryWithFreshRequest) {
+				throw error;
+			}
+
+			console.warn("[OmniChat] Adapter request state rejected, fallback to fresh request.");
+			payload = adapter.buildRequest(
+				context.resolvedModel,
+				context.baseUrl,
+				context.apiKey,
+				convertedMessages,
+				options
+			);
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body);
+		}
+
+		if (!response.body) {
+			throw new EmptyResponseRetryError("No response body");
+		}
+
+		const result = await this.processAdapterStream(adapter, response.body, progress, token);
+		adapter.commitStreamResult(result);
+		if (context.retryConfig.retryEmptyResponse && !adapter.hasEmittedResponseContent) {
+			throw new EmptyResponseRetryError();
+		}
+
+		return adapter;
+	}
+
+	private async fetchChatResponse(
+		url: string,
+		headers: Record<string, string>,
+		body: unknown
+	): Promise<Response> {
+		let response: Response;
+		try {
+			response = await fetch(url, {
+				method: "POST",
+				headers,
+				body: JSON.stringify(body),
+			});
+		} catch (error) {
+			const cause = error instanceof Error ? error : new Error(String(error));
+			throw createNetworkRetryError(`Request failed before response was received: ${cause.message}`, cause);
+		}
+
+		if (!response.ok) {
+			const errorText = await response.text();
+			throw new RetryableHttpError(response.status, response.statusText, errorText || undefined, url);
+		}
+
+		return response;
+	}
+
+	private async processAdapterStream(
+		adapter: BaseAdapter,
+		body: ReadableStream<Uint8Array>,
+		progress: SafeProgressReporter,
+		token: CancellationToken
+	): Promise<{ responseId?: string }> {
+		try {
+			return await adapter.processStream(body, progress, token);
+		} catch (error) {
+			const cause = error instanceof Error ? error : new Error(String(error));
+			throw createNetworkRetryError(`Response stream failed: ${cause.message}`, cause);
+		}
+	}
+
+	private createUserVisibleRequestError(modelId: string, error: unknown): Error {
+		const message = error instanceof Error ? error.message : String(error);
+		OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] Request failed for ${modelId}`);
+		OUTPUT_CHANNEL.appendLine(message);
+		OUTPUT_CHANNEL.appendLine("");
+		console.error("[OmniChat] Request failed", {
+			modelId,
+			error: message,
+		});
+		return new Error(truncateErrorForUser(message));
+	}
+
+	private reportRetryNotice(
+		info: Parameters<NonNullable<Parameters<typeof executeWithRetry>[2]>>[0],
+		progress: SafeProgressReporter,
+		state: RetryNoticeState
+	): void {
+		state.count += 1;
+		const nextTimeText = info.nextRetryAt.toLocaleTimeString("zh-CN", {
+			hour12: false,
+			hour: "2-digit",
+			minute: "2-digit",
+			second: "2-digit",
+		});
+		const reasonLabel = RETRY_REASON_LABELS[info.reason];
+		const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+
+		if (!state.activeId) {
+			state.activeId = `retry_notice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+		}
+		progress.report(new vscode.LanguageModelThinkingPart(body, state.activeId, {
+			type: "retry_notice",
+			attemptNumber: info.attemptNumber,
+			reason: info.reason,
+			nextRetryAt: info.nextRetryAt.toISOString(),
+		}));
+	}
+
+	private closeRetryNotice(progress: SafeProgressReporter, state: RetryNoticeState): void {
+		if (!state.activeId) {
+			return;
+		}
+
+		progress.report(new vscode.LanguageModelThinkingPart("", state.activeId));
+		state.activeId = undefined;
 	}
 
 	private findModelConfig(parsedId: { providerId: string; baseId: string; configId?: string }): ModelItem | undefined {
@@ -339,23 +469,56 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		}
 	}
 
-	private getMaxOutputTokens(model: ModelItem): number | undefined {
-		const apiMode = model.apiMode ?? "openai";
-		switch (apiMode) {
-			case "openai":
-				return (model as any).max_completion_tokens ?? (model as any).max_tokens;
-			case "openai-responses":
-				return (model as any).max_output_tokens;
-			case "anthropic":
-				return (model as any).max_tokens;
-			case "gemini":
-				return (model as any).maxOutputTokens;
-			case "ollama":
-				return (model as any).num_predict;
-			default:
-				return (model as any).max_tokens;
+	private createConversationKey(messages: readonly LanguageModelChatRequestMessage[]): string {
+		const pieces: string[] = [];
+
+		for (const message of messages) {
+			const role = String(message.role);
+			let textPreview = "";
+			let textLength = 0;
+			let imageCount = 0;
+			let toolCallCount = 0;
+			let toolResultCount = 0;
+
+			for (const part of message.content ?? []) {
+				if (part instanceof vscode.LanguageModelTextPart) {
+					textLength += part.value.length;
+					if (textPreview.length < 120) {
+						textPreview += part.value.slice(0, 120 - textPreview.length);
+					}
+					continue;
+				}
+
+				if (part instanceof vscode.LanguageModelDataPart) {
+					imageCount += 1;
+					continue;
+				}
+
+				if (part instanceof vscode.LanguageModelToolCallPart) {
+					toolCallCount += 1;
+					continue;
+				}
+
+				if (part && typeof part === "object" && "callId" in (part as Record<string, unknown>)) {
+					toolResultCount += 1;
+				}
+			}
+
+			pieces.push(
+				`${role}|t:${textLength}|p:${textPreview}|i:${imageCount}|tc:${toolCallCount}|tr:${toolResultCount}`
+			);
 		}
+
+		const source = pieces.join("||") || "empty";
+		let hash = 2166136261;
+		for (let i = 0; i < source.length; i++) {
+			hash ^= source.charCodeAt(i);
+			hash = Math.imul(hash, 16777619);
+		}
+
+		return `conv_${(hash >>> 0).toString(36)}`;
 	}
+
 }
 
 function truncateErrorForUser(message: string): string {

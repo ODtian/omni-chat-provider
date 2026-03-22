@@ -11,6 +11,11 @@ import type {
 } from "./types";
 
 const SECTION = "omnichat";
+export const INTERNAL_PROVIDER_MODEL_PREFIX = "__provider__";
+
+function isProviderItemCandidate(value: unknown): value is ProviderItem {
+	return !!value && typeof value === "object" && typeof (value as { id?: unknown }).id === "string";
+}
 
 /** Centralised, typed access to `omnichat.*` settings. */
 export class Config {
@@ -18,10 +23,7 @@ export class Config {
 
 	static getProviders(): ProviderItem[] {
 		const raw = getMergedArraySetting(`${SECTION}.providers`);
-		const providers = raw.filter(
-			(item): item is ProviderItem =>
-				!!item && typeof item === "object" && typeof (item as any).id === "string"
-		);
+		const providers = raw.filter(isProviderItemCandidate);
 		const merged = new Map<string, ProviderItem>();
 		for (const provider of providers) {
 			const normalizedId = normalizeProviderId(provider.id);
@@ -155,7 +157,7 @@ export class Config {
 
 // ── Helpers ──
 
-function getProviderId(obj: Record<string, unknown>): string {
+function resolveProviderIdFromConfigObject(obj: Record<string, unknown>): string {
 	const pick = (v: unknown): string => (typeof v === "string" ? v.trim() : "");
 	return (
 		pick(obj.owned_by) ||
@@ -164,6 +166,11 @@ function getProviderId(obj: Record<string, unknown>): string {
 		pick(obj.vendor) ||
 		""
 	);
+}
+
+export function isInternalProviderModel(modelOrId: Pick<ModelItem, "id"> | string): boolean {
+	const id = typeof modelOrId === "string" ? modelOrId : modelOrId.id;
+	return id.startsWith(INTERNAL_PROVIDER_MODEL_PREFIX);
 }
 
 function normalizeProviderId(value: string | undefined): string {
@@ -213,7 +220,7 @@ function normalizeModels(raw: unknown, providers: ProviderItem[]): ModelItem[] {
 			continue;
 		}
 		const obj = item as Record<string, unknown>;
-		const providerId = getProviderId(obj);
+		const providerId = resolveProviderIdFromConfigObject(obj);
 		const providerDef = providerId ? providerMap.get(providerId.toLowerCase()) : undefined;
 
 		// Model fields override provider fields which override globals

@@ -59,13 +59,14 @@ async function countViaGemini(options: {
 	}
 
 	const adapter = new GeminiAdapter();
+	const converted = adapter.convertMessages([toRequestMessage(options.input)], {
+		includeReasoningInRequest: false,
+	});
 	const body: Record<string, unknown> = {
-		contents: adapter.convertMessages([toRequestMessage(options.input)], {
-			includeReasoningInRequest: false,
-		}),
+		contents: converted.messages,
 	};
 
-	const systemContent = (adapter as any)._systemContent;
+	const systemContent = converted.systemContent;
 	if (typeof systemContent === "string" && systemContent) {
 		body.systemInstruction = {
 			role: "user",
@@ -101,14 +102,15 @@ async function countViaAnthropic(options: {
 	}
 
 	const adapter = new AnthropicAdapter();
+	const converted = adapter.convertMessages([toRequestMessage(options.input)], {
+		includeReasoningInRequest: false,
+	});
 	const body: Record<string, unknown> = {
 		model: options.model.id,
-		messages: adapter.convertMessages([toRequestMessage(options.input)], {
-			includeReasoningInRequest: false,
-		}),
+		messages: converted.messages,
 	};
 
-	const systemContent = (adapter as any)._systemContent;
+	const systemContent = converted.systemContent;
 	if (typeof systemContent === "string" && systemContent) {
 		body.system = systemContent;
 	}
@@ -194,7 +196,7 @@ function countResponsesMessageTokens(
 	input: vscode.LanguageModelChatRequestMessage
 ): number {
 	const adapter = new OpenAIResponsesAdapter();
-	const items = adapter.convertMessages([input], { includeReasoningInRequest: true });
+	const items = adapter.convertMessages([input], { includeReasoningInRequest: true }).messages;
 	let total = 0;
 	for (const item of items) {
 		total += RESPONSES_ITEM_OVERHEAD;
