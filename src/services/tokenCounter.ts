@@ -5,7 +5,7 @@ import { Config } from "../config";
 import type { ModelItem } from "../types";
 import { ApiKeyManager } from "./apiKeyManager";
 import { AnthropicAdapter } from "../adapters/anthropic";
-import { GeminiAdapter } from "../adapters/gemini";
+import { buildGeminiApiUrl, GeminiAdapter } from "../adapters/gemini";
 import { OpenAIResponsesAdapter } from "../adapters/openaiResponses";
 import { BaseAdapter } from "../adapters/base";
 
@@ -69,12 +69,11 @@ async function countViaGemini(options: {
 	const systemContent = converted.systemContent;
 	if (typeof systemContent === "string" && systemContent) {
 		body.systemInstruction = {
-			role: "user",
 			parts: [{ text: systemContent }],
 		};
 	}
 
-	const url = `${resolveBaseUrl(options.model).replace(/\/+$/, "")}/v1beta/models/${options.model.id}:countTokens`;
+	const url = buildGeminiApiUrl(resolveBaseUrl(options.model), options.model.id, "countTokens");
 	const response = await fetchWithCancellation(url, {
 		method: "POST",
 		headers: BaseAdapter.prepareHeaders(apiKey, "gemini", options.model.headers),

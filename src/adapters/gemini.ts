@@ -21,6 +21,32 @@ import { convertToolsToGemini } from "../utils/toolConverter";
 
 const GEMINI_SIGNATURE_MARKER_TYPE = "gemini_thought_signature";
 
+type GeminiEndpointAction = "streamGenerateContent" | "countTokens";
+
+function normalizeGeminiModelId(modelId: string): string {
+	return modelId.replace(/^models\//i, "").trim();
+}
+
+export function buildGeminiApiUrl(
+	baseUrl: string,
+	modelId: string,
+	action: GeminiEndpointAction
+): string {
+	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+	const normalizedModelId = normalizeGeminiModelId(modelId);
+	const suffix = action === "streamGenerateContent" ? "?alt=sse" : "";
+
+	if (/\/v1beta\/models$/i.test(normalizedBaseUrl)) {
+		return `${normalizedBaseUrl}/${normalizedModelId}:${action}${suffix}`;
+	}
+
+	if (/\/v1beta$/i.test(normalizedBaseUrl)) {
+		return `${normalizedBaseUrl}/models/${normalizedModelId}:${action}${suffix}`;
+	}
+
+	return `${normalizedBaseUrl}/v1beta/models/${normalizedModelId}:${action}${suffix}`;
+}
+
 interface GeminiPart {
 	text?: string;
 	thought?: boolean;
@@ -167,7 +193,6 @@ export class GeminiAdapter extends BaseAdapter {
 
 		if (systemContent) {
 			body.systemInstruction = {
-				role: "user",
 				parts: [{ text: systemContent }],
 			};
 		}
@@ -185,14 +210,13 @@ export class GeminiAdapter extends BaseAdapter {
 		if (topK !== undefined) { genConfig.topK = topK; }
 		const topP = geminiModel.topP;
 		if (topP !== undefined) { genConfig.topP = topP; }
+		const thinkingConfig = geminiModel.thinkingConfig;
+		if (thinkingConfig && typeof thinkingConfig === "object") {
+			genConfig.thinkingConfig = thinkingConfig;
+		}
 
 		if (Object.keys(genConfig).length > 0) {
 			body.generationConfig = genConfig;
-		}
-
-		const thinkingConfig = geminiModel.thinkingConfig;
-		if (thinkingConfig && typeof thinkingConfig === "object") {
-			body.thinkingConfig = thinkingConfig;
 		}
 
 		const toolConfig = convertToolsToGemini(options);
@@ -209,8 +233,7 @@ export class GeminiAdapter extends BaseAdapter {
 			}
 		}
 
-		const normalized = baseUrl.replace(/\/+$/, "");
-		const url = `${normalized}/v1beta/models/${model.id}:streamGenerateContent?alt=sse`;
+		const url = buildGeminiApiUrl(baseUrl, model.id, "streamGenerateContent");
 		const headers = BaseAdapter.prepareHeaders(apiKey, "gemini", model.headers);
 
 		return { url, headers, body };

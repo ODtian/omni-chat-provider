@@ -35,6 +35,8 @@ declare module "vscode" {
 		readonly statusIcon?: ThemeIcon;
 		readonly configurationSchema?: LanguageModelConfigurationSchema;
 		readonly targetChatSessionType?: string;
+		readonly contextWindow?: number;
+		readonly contextLength?: number;
 	}
 
 	export interface LanguageModelChatCapabilities {

@@ -143,6 +143,8 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					version: "1.0.0",
 					maxInputTokens: maxInput,
 					maxOutputTokens: maxOutput,
+					contextWindow: contextLen,
+					contextLength: contextLen,
 					isUserSelectable: true,
 					isDefault: false,
 					category: { label: providerId, order: 0 },
@@ -275,8 +277,10 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	): Promise<void> {
 		let activeAdapter: BaseAdapter | undefined;
 
-		await executeWithRetry(async () => {
-			activeAdapter = await this.executeSingleRequest(context, options, progress, token);
+		await executeWithRetry(async (signal) => {
+			await this.executeSingleRequest(context, options, progress, token, signal, (adapter) => {
+				activeAdapter = adapter;
+			});
 		}, context.retryConfig, async (info) => {
 			if (token.isCancellationRequested) {
 				return;
@@ -295,9 +299,13 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		context: ResolvedRequestContext,
 		options: ProvideLanguageModelChatResponseOptions,
 		progress: SafeProgressReporter,
-		token: CancellationToken
-	): Promise<BaseAdapter> {
+		token: CancellationToken,
+		signal: AbortSignal,
+		onAdapterCreated: (adapter: BaseAdapter) => void
+	): Promise<void> {
 		const adapter = this.createAdapter(context.apiMode);
+		onAdapterCreated(adapter);
+
 		const conversationKey = this.createConversationKey(context.interceptedMessages);
 		adapter.prepareRequestScope({
 			requestInitiator: options.requestInitiator,
@@ -316,7 +324,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 
 		let response: Response;
 		try {
-			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body);
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token);
 		} catch (error) {
 			if (!adapter.handleRequestError(error).retryWithFreshRequest) {
 				throw error;
@@ -330,7 +338,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 				convertedMessages,
 				options
 			);
-			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body);
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token);
 		}
 
 		if (!response.body) {
@@ -342,25 +350,34 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		if (context.retryConfig.retryEmptyResponse && !adapter.hasEmittedResponseContent) {
 			throw new EmptyResponseRetryError();
 		}
-
-		return adapter;
 	}
 
 	private async fetchChatResponse(
 		url: string,
 		headers: Record<string, string>,
-		body: unknown
+		body: unknown,
+		signal: AbortSignal,
+		token: CancellationToken
 	): Promise<Response> {
+		const controller = new AbortController();
+		const onAbort = () => controller.abort();
+		signal.addEventListener("abort", onAbort);
+		const tokenDisp = token.onCancellationRequested(onAbort);
+
 		let response: Response;
 		try {
 			response = await fetch(url, {
 				method: "POST",
 				headers,
 				body: JSON.stringify(body),
+				signal: controller.signal,
 			});
 		} catch (error) {
 			const cause = error instanceof Error ? error : new Error(String(error));
 			throw createNetworkRetryError(`Request failed before response was received: ${cause.message}`, cause);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+			tokenDisp.dispose();
 		}
 
 		if (!response.ok) {
@@ -389,12 +406,22 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		const message = error instanceof Error ? error.message : String(error);
 		OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] Request failed for ${modelId}`);
 		OUTPUT_CHANNEL.appendLine(message);
+		if (error instanceof Error && error.stack) {
+			OUTPUT_CHANNEL.appendLine(error.stack);
+		}
 		OUTPUT_CHANNEL.appendLine("");
 		console.error("[OmniChat] Request failed", {
 			modelId,
 			error: message,
 		});
-		return new Error(truncateErrorForUser(message));
+		
+		const displayType = "OmniChat API Request Error";
+		// To prevent VS Code from displaying giant raw HTML stack traces in chat responses,
+		// we strip out the original stack.
+		const err = new Error(truncateErrorForUser(message));
+		err.name = displayType;
+		err.stack = `${displayType}: ${err.message}`;
+		return err;
 	}
 
 	private reportRetryNotice(

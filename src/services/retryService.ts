@@ -105,10 +105,10 @@ export function classifyRetryError(
 
 	return {
 		reason,
-		isRetryableStatus,
-		isRetryableNetwork,
-		isTimeout,
-		isEmptyResponse,
+		isRetryableStatus: reason === "http-status",
+		isRetryableNetwork: reason === "network",
+		isTimeout: reason === "timeout",
+		isEmptyResponse: reason === "empty-response",
 	};
 }
 
@@ -142,13 +142,14 @@ export function shouldRetryRequest(options: {
  * Execute an async function with retry logic for transient errors.
  */
 export async function executeWithRetry<T>(
-	fn: () => Promise<T>,
+	fn: (signal: AbortSignal) => Promise<T>,
 	config: Required<RetryConfig>,
 	onRetry?: (info: RetryAttemptInfo) => void | Promise<void>,
 	shouldRetry?: (error: Error) => boolean | undefined
 ): Promise<T> {
 	if (!config.enabled) {
-		return await fn();
+		const controller = new AbortController();
+		return await fn(controller.signal);
 	}
 
 	const retryableCodes = [
@@ -157,17 +158,21 @@ export async function executeWithRetry<T>(
 	let lastError: Error | undefined;
 
 	for (let attempt = 0; attempt <= config.maxAttempts; attempt++) {
+		const controller = new AbortController();
 		let timeoutId: NodeJS.Timeout | undefined;
 		const timeoutPromise = config.timeoutMs > 0
 			? new Promise<T>((_, reject) => {
-					timeoutId = setTimeout(() => reject(createTimeoutError(config.timeoutMs)), config.timeoutMs);
+					timeoutId = setTimeout(() => {
+						controller.abort();
+						reject(createTimeoutError(config.timeoutMs));
+					}, config.timeoutMs);
 			  })
 			: null;
 
 		try {
 			const result = timeoutPromise
-				? await Promise.race([fn(), timeoutPromise])
-				: await fn();
+				? await Promise.race([fn(controller.signal), timeoutPromise])
+				: await fn(controller.signal);
 			if (timeoutId) { clearTimeout(timeoutId); }
 			return result;
 		} catch (error) {
