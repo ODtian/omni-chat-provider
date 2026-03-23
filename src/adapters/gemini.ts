@@ -30,11 +30,20 @@ function normalizeGeminiModelId(modelId: string): string {
 export function buildGeminiApiUrl(
 	baseUrl: string,
 	modelId: string,
-	action: GeminiEndpointAction
+	action: GeminiEndpointAction,
+	apiKey?: string
 ): string {
 	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
 	const normalizedModelId = normalizeGeminiModelId(modelId);
-	const suffix = action === "streamGenerateContent" ? "?alt=sse" : "";
+	const searchParams = new URLSearchParams();
+	if (action === "streamGenerateContent") {
+		searchParams.set("alt", "sse");
+	}
+	if (apiKey) {
+		searchParams.set("key", apiKey);
+	}
+	const suffixStr = searchParams.toString();
+	const suffix = suffixStr ? `?${suffixStr}` : "";
 
 	if (/\/v1beta\/models$/i.test(normalizedBaseUrl)) {
 		return `${normalizedBaseUrl}/${normalizedModelId}:${action}${suffix}`;
@@ -168,8 +177,17 @@ export class GeminiAdapter extends BaseAdapter {
 
 			if (parts.length > 0) {
 				const geminiRole = role === "assistant" ? "model" : "user";
-				contents.push({ role: geminiRole, parts });
+				const lastContent = contents[contents.length - 1];
+				if (lastContent && lastContent.role === geminiRole) {
+					lastContent.parts.push(...parts);
+				} else {
+					contents.push({ role: geminiRole, parts });
+				}
 			}
+		}
+
+		if (contents.length > 0 && contents[0].role === "model") {
+			contents.unshift({ role: "user", parts: [{ text: " " }] });
 		}
 
 		return {
@@ -233,7 +251,7 @@ export class GeminiAdapter extends BaseAdapter {
 			}
 		}
 
-		const url = buildGeminiApiUrl(baseUrl, model.id, "streamGenerateContent");
+		const url = buildGeminiApiUrl(baseUrl, model.id, "streamGenerateContent", apiKey);
 		const headers = BaseAdapter.prepareHeaders(apiKey, "gemini", model.headers);
 
 		return { url, headers, body };
@@ -325,6 +343,15 @@ export class GeminiAdapter extends BaseAdapter {
 				this.flushThinkingBuffer(progress);
 				this.reportThoughtSignatureMarker(thoughtSignature, progress);
 			}
+		}
+
+		const usage = chunk.usageMetadata as Record<string, number> | undefined;
+		if (usage && typeof usage === "object") {
+			this.emitUsage(progress, {
+				promptTokens: usage.promptTokenCount,
+				completionTokens: usage.candidatesTokenCount,
+				totalTokens: usage.totalTokenCount,
+			});
 		}
 	}
 

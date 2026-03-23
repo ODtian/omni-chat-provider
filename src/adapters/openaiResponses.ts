@@ -477,6 +477,15 @@ export class OpenAIResponsesAdapter extends BaseAdapter {
 
 			case "response.completed":
 			case "response.done": {
+				const resp = event.response as Record<string, unknown> | undefined;
+				const usage = resp?.usage as Record<string, number> | undefined;
+				if (usage && typeof usage === "object") {
+					this.emitUsage(progress, {
+						promptTokens: usage.input_tokens || usage.prompt_tokens,
+						completionTokens: usage.output_tokens || usage.completion_tokens,
+						totalTokens: usage.total_tokens,
+					});
+				}
 				await this.flushToolCallBuffers(progress, false);
 				this.reportEndThinking(progress);
 				return;

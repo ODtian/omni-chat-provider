@@ -186,6 +186,27 @@ export class AnthropicAdapter extends BaseAdapter {
 				this.reportEndThinking(progress);
 				return;
 			}
+
+			case "message_start": {
+				const msg = event.message as Record<string, unknown> | undefined;
+				const usage = msg?.usage as Record<string, number> | undefined;
+				if (usage && typeof usage.input_tokens === "number") {
+					this.emitUsage(progress, {
+						promptTokens: usage.input_tokens,
+					});
+				}
+				return;
+			}
+
+			case "message_delta": {
+				const usage = event.usage as Record<string, number> | undefined;
+				if (usage && typeof usage.output_tokens === "number") {
+					this.emitUsage(progress, {
+						completionTokens: usage.output_tokens,
+					});
+				}
+				return;
+			}
 		}
 	}
 }

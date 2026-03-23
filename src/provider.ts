@@ -141,10 +141,8 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					tooltip: detail,
 					family: model.family ?? EXTENSION_LABEL,
 					version: "1.0.0",
-					maxInputTokens: maxInput,
+					maxInputTokens: contextLen,
 					maxOutputTokens: maxOutput,
-					contextWindow: contextLen,
-					contextLength: contextLen,
 					isUserSelectable: true,
 					isDefault: false,
 					category: { label: providerId, order: 0 },
@@ -437,7 +435,8 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			second: "2-digit",
 		});
 		const reasonLabel = RETRY_REASON_LABELS[info.reason];
-		const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+		const prefix = state.count > 1 ? "\n" : "";
+		const body = `${prefix}${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
 
 		if (!state.activeId) {
 			state.activeId = `retry_notice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
