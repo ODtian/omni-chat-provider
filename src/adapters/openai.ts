@@ -230,7 +230,6 @@ export class OpenAIAdapter extends BaseAdapter {
 			return;
 		}
 
-		// Text content
 		if (typeof delta.content === "string") {
 			this.reportEndThinking(progress);
 
@@ -242,6 +241,16 @@ export class OpenAIAdapter extends BaseAdapter {
 					this.markAssistantTextEmitted();
 				}
 			}
+		}
+		
+		// Usage
+		if (chunk.usage && typeof chunk.usage === "object") {
+			const u = chunk.usage as Record<string, number>;
+			this.emitUsage(progress, {
+				promptTokens: u.prompt_tokens,
+				completionTokens: u.completion_tokens,
+				totalTokens: u.total_tokens,
+			});
 		}
 	}
 }

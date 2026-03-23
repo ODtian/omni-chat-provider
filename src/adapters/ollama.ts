@@ -103,6 +103,23 @@ export class OllamaAdapter extends BaseAdapter {
 							this.processTextContent(message.content, progress);
 						}
 					}
+					if (parsed.done === true) {
+						let promptTokens: number | undefined;
+						let completionTokens: number | undefined;
+						if (typeof parsed.prompt_eval_count === "number") {
+							promptTokens = parsed.prompt_eval_count;
+						}
+						if (typeof parsed.eval_count === "number") {
+							completionTokens = parsed.eval_count;
+						}
+						if (promptTokens !== undefined || completionTokens !== undefined) {
+							this.emitUsage(progress, {
+								promptTokens,
+								completionTokens,
+								totalTokens: (promptTokens ?? 0) + (completionTokens ?? 0)
+							});
+						}
+					}
 				} catch { /* ignore */ }
 			});
 		} finally {

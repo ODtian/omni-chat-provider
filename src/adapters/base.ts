@@ -464,6 +464,20 @@ export abstract class BaseAdapter {
 
 	// ── Shared text processing ──
 
+	protected emitUsage(
+		progress: Progress<LanguageModelResponsePart2>,
+		usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
+	): void {
+		try {
+			progress.report({ 
+				type: "usage", 
+				value: usage 
+			} as any);
+		} catch (e) {
+			// ignore
+		}
+	}
+
 	protected processTextContent(
 		input: string,
 		progress: Progress<LanguageModelResponsePart2>

@@ -23,3 +23,10 @@ test("buildGeminiApiUrl reuses existing models root and strips models prefix", (
 		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
 	);
 });
+
+test("buildGeminiApiUrl passes apiKey via URL when provided", () => {
+	assert.equal(
+		buildGeminiApiUrl("https://generativelanguage.googleapis.com", "gemini-2.5-flash", "streamGenerateContent", "some_secret_key"),
+		"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse&key=some_secret_key"
+	);
+});
