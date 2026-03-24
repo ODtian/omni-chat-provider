@@ -25,8 +25,10 @@ export function getModelMaxOutputTokens(model: ModelItem): number | undefined {
 			const openAIModel = model as OpenAIModelItem;
 			return openAIModel.max_completion_tokens ?? openAIModel.max_tokens;
 		}
-		case "openai-responses":
-			return (model as OpenAIResponsesModelItem).max_output_tokens;
+		case "openai-responses": {
+			const responsesModel = model as OpenAIResponsesModelItem;
+			return responsesModel.max_output_tokens;
+		}
 		case "anthropic":
 			return (model as AnthropicModelItem).max_tokens;
 		case "gemini":

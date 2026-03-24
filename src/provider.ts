@@ -27,7 +27,7 @@ import {
 	shouldRetryRequest,
 } from "./services/retryService";
 import { interceptSystemPrompt } from "./prompt/interceptor";
-import { DEFAULT_CONTEXT_LENGTH, DEFAULT_MAX_OUTPUT_TOKENS, getModelMaxOutputTokens } from "./modelParams";
+import { DEFAULT_MAX_OUTPUT_TOKENS, getModelInputTokenBudget, getModelMaxOutputTokens } from "./modelParams";
 import { countTokensForInput } from "./services/tokenCounter";
 
 import { BaseAdapter } from "./adapters/base";
@@ -45,7 +45,6 @@ type SafeProgressReporter = Progress<LanguageModelResponsePart2>;
 
 interface RetryNoticeState {
 	activeId?: string;
-	count: number;
 }
 
 interface ResolvedRequestContext {
@@ -76,6 +75,7 @@ type ProviderGroupConfiguration = {
  */
 export class OmniChatProvider implements LanguageModelChatProvider {
 	private _lastRequestTime: number | null = null;
+	private _requestSequence = 0;
 	private readonly _keyManager: ApiKeyManager;
 
 	constructor(secrets: vscode.SecretStorage) {
@@ -126,9 +126,8 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		return models
 			.filter((model) => !isInternalProviderModel(model))
 			.map((model) => {
-				const contextLen = model.context_length ?? DEFAULT_CONTEXT_LENGTH;
 				const maxOutput = getModelMaxOutputTokens(model) ?? DEFAULT_MAX_OUTPUT_TOKENS;
-				const maxInput = Math.max(1, contextLen - maxOutput);
+				const maxInput = getModelInputTokenBudget(model);
 				const modelId = buildScopedModelId(model);
 				const fallbackName = model.configId ? `${model.id}::${model.configId}` : model.id;
 				const modelName = model.displayName || fallbackName;
@@ -141,7 +140,7 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 					tooltip: detail,
 					family: model.family ?? EXTENSION_LABEL,
 					version: "1.0.0",
-					maxInputTokens: contextLen,
+					maxInputTokens: maxInput,
 					maxOutputTokens: maxOutput,
 					isUserSelectable: true,
 					isDefault: false,
@@ -182,22 +181,35 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		token: CancellationToken
 	): Promise<void> {
 		const safeProgress = this.createSafeProgress(progress);
-		const retryNoticeState: RetryNoticeState = { count: 0 };
+		const retryNoticeState: RetryNoticeState = {};
+		const requestTag = this.createRequestTag(model.id);
+		this.logInfo(
+			requestTag,
+			`Request started. messages=${messages.length}, initiator=${options.requestInitiator ?? "unknown"}`
+		);
 
 		try {
-			const requestContext = await this.resolveRequestContext(model, messages);
+			const requestContext = await this.resolveRequestContext(model, messages, requestTag);
+			await this.applyDelay(requestContext.resolvedModel, requestTag);
+			this._lastRequestTime = Date.now();
+			this.logInfo(requestTag, "Dispatching API request.");
 			await this.executeChatRequest(
 				requestContext,
 				options,
 				safeProgress,
 				token,
-				retryNoticeState
+				retryNoticeState,
+				requestTag
 			);
+			this.logInfo(requestTag, "Request completed successfully.");
 		} catch (err) {
-			throw this.createUserVisibleRequestError(model.id, err);
+			if (token.isCancellationRequested) {
+				this.logWarn(requestTag, "Request ended due to cancellation.");
+			}
+			throw this.createUserVisibleRequestError(model.id, err, requestTag);
 		} finally {
 			this.closeRetryNotice(safeProgress, retryNoticeState);
-			this._lastRequestTime = Date.now();
+			this.logInfo(requestTag, "Request finished.");
 		}
 	}
 
@@ -215,7 +227,8 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 
 	private async resolveRequestContext(
 		model: LanguageModelChatInformation,
-		messages: readonly LanguageModelChatRequestMessage[]
+		messages: readonly LanguageModelChatRequestMessage[],
+		requestTag: string
 	): Promise<ResolvedRequestContext> {
 		const parsedId = parseScopedModelId(model.id);
 		const resolvedModel = this.findModelConfig(parsedId);
@@ -223,11 +236,15 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			throw new Error(`Model configuration not found for "${model.id}"`);
 		}
 
-		await this.applyDelay(resolvedModel);
+		this.logInfo(
+			requestTag,
+			`Resolved model. provider=${parsedId.providerId || resolvedModel.owned_by}, apiMode=${resolvedModel.apiMode ?? "openai"}`
+		);
 
-		const apiKey = await this.resolveApiKey(parsedId.providerId, resolvedModel);
+		const apiKey = await this.resolveApiKey(parsedId.providerId, resolvedModel, requestTag);
 		const baseUrl = this.resolveBaseUrl(resolvedModel);
 		const apiMode: ApiMode = resolvedModel.apiMode ?? "openai";
+		this.logInfo(requestTag, `Using base URL: ${this.sanitizeUrlForLog(baseUrl)}`);
 
 		return {
 			resolvedModel,
@@ -246,14 +263,31 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		};
 	}
 
-	private async resolveApiKey(providerId: string, resolvedModel: ModelItem): Promise<string> {
+	private async resolveApiKey(providerId: string, resolvedModel: ModelItem, requestTag: string): Promise<string> {
 		const useGenericKey = !resolvedModel.baseUrl;
+		const keyProvider = providerId || resolvedModel.owned_by;
+		const existingKey = await this._keyManager.getKey(keyProvider, useGenericKey);
+		if (existingKey) {
+			this.logInfo(
+				requestTag,
+				`API key resolved from secret storage. provider=${keyProvider}, genericFallback=${useGenericKey}`
+			);
+		} else {
+			this.logWarn(
+				requestTag,
+				`API key missing. Waiting for user input. provider=${keyProvider}, genericFallback=${useGenericKey}`
+			);
+		}
 		const apiKey = await this._keyManager.ensureKey(
-			providerId || resolvedModel.owned_by,
+			keyProvider,
 			useGenericKey
 		);
 		if (!apiKey) {
+			this.logWarn(requestTag, "API key not provided.");
 			throw new Error("API key not found");
+		}
+		if (!existingKey) {
+			this.logInfo(requestTag, "API key captured successfully.");
 		}
 		return apiKey;
 	}
@@ -271,25 +305,52 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		options: ProvideLanguageModelChatResponseOptions,
 		progress: SafeProgressReporter,
 		token: CancellationToken,
-		retryNoticeState: RetryNoticeState
+		retryNoticeState: RetryNoticeState,
+		requestTag: string
 	): Promise<void> {
 		let activeAdapter: BaseAdapter | undefined;
+		this.logInfo(
+			requestTag,
+			`Retry config enabled=${context.retryConfig.enabled}, maxAttempts=${context.retryConfig.maxAttempts}, intervalMs=${context.retryConfig.intervalMs}, timeoutMs=${context.retryConfig.timeoutMs}`
+		);
 
 		await executeWithRetry(async (signal) => {
 			await this.executeSingleRequest(context, options, progress, token, signal, (adapter) => {
 				activeAdapter = adapter;
-			});
+			}, requestTag);
 		}, context.retryConfig, async (info) => {
 			if (token.isCancellationRequested) {
+				this.logWarn(requestTag, "Cancellation requested before retry could start.");
 				return;
 			}
-			this.reportRetryNotice(info, progress, retryNoticeState);
+			this.reportRetryNotice(info, progress, retryNoticeState, requestTag);
 		}, (error) => {
-			return shouldRetryRequest({
+			const interruptedDuringThinking = activeAdapter?.lastStreamInterruptedDuringThinking ?? false;
+			const hasEmittedResponseContent = activeAdapter?.hasEmittedResponseContent ?? false;
+			if (interruptedDuringThinking) {
+				this.logWarn(
+					requestTag,
+					`Failure happened during thinking stream. hasEmittedResponseContent=${hasEmittedResponseContent}`
+				);
+			}
+			const retryDecision = shouldRetryRequest({
 				error,
 				tokenCancelled: token.isCancellationRequested,
-				hasEmittedResponseContent: activeAdapter?.hasEmittedResponseContent ?? false,
+				hasEmittedResponseContent,
 			});
+			if (retryDecision === false) {
+				if (token.isCancellationRequested) {
+					this.logWarn(requestTag, "Retry skipped because request was cancelled.");
+				} else {
+					this.logWarn(requestTag, "Retry skipped because partial response content was already emitted.");
+				}
+			} else if (interruptedDuringThinking) {
+				this.logInfo(
+					requestTag,
+					`Retry remains eligible after thinking interruption. hasEmittedResponseContent=${hasEmittedResponseContent}`
+				);
+			}
+			return retryDecision;
 		});
 	}
 
@@ -299,10 +360,12 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		progress: SafeProgressReporter,
 		token: CancellationToken,
 		signal: AbortSignal,
-		onAdapterCreated: (adapter: BaseAdapter) => void
+		onAdapterCreated: (adapter: BaseAdapter) => void,
+		requestTag: string
 	): Promise<void> {
 		const adapter = this.createAdapter(context.apiMode);
 		onAdapterCreated(adapter);
+		this.logInfo(requestTag, `Adapter created: ${adapter.constructor.name}`);
 
 		const conversationKey = this.createConversationKey(context.interceptedMessages);
 		adapter.prepareRequestScope({
@@ -319,15 +382,20 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			convertedMessages,
 			options
 		);
+		this.logInfo(
+			requestTag,
+			`Prepared request payload. url=${this.sanitizeUrlForLog(payload.url)}, messageCount=${convertedMessages.messages.length}`
+		);
 
 		let response: Response;
 		try {
-			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token);
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token, requestTag);
 		} catch (error) {
 			if (!adapter.handleRequestError(error).retryWithFreshRequest) {
 				throw error;
 			}
 
+			this.logWarn(requestTag, "Adapter request state was rejected. Retrying once with a fresh request payload.");
 			console.warn("[OmniChat] Adapter request state rejected, fallback to fresh request.");
 			payload = adapter.buildRequest(
 				context.resolvedModel,
@@ -336,16 +404,29 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 				convertedMessages,
 				options
 			);
-			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token);
+			response = await this.fetchChatResponse(payload.url, payload.headers, payload.body, signal, token, requestTag);
 		}
 
 		if (!response.body) {
+			this.logWarn(requestTag, "Response received without body.");
 			throw new EmptyResponseRetryError("No response body");
 		}
 
-		const result = await this.processAdapterStream(adapter, response.body, progress, token);
+		const result = await this.processAdapterStream(adapter, response.body, progress, token, requestTag);
 		adapter.commitStreamResult(result);
+		if (result.responseId) {
+			this.logInfo(requestTag, `Stream completed. responseId=${result.responseId}`);
+		} else {
+			this.logInfo(requestTag, "Stream completed.");
+		}
 		if (context.retryConfig.retryEmptyResponse && !adapter.hasEmittedResponseContent) {
+			if (adapter.lastStreamInterruptedDuringThinking) {
+				this.logWarn(
+					requestTag,
+					"Thinking stream was interrupted before any response content was emitted. Empty-response retry path will be used."
+				);
+			}
+			this.logWarn(requestTag, "Response stream finished without emitting response content. Will be treated as empty response.");
 			throw new EmptyResponseRetryError();
 		}
 	}
@@ -355,15 +436,20 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		headers: Record<string, string>,
 		body: unknown,
 		signal: AbortSignal,
-		token: CancellationToken
+		token: CancellationToken,
+		requestTag: string
 	): Promise<Response> {
 		const controller = new AbortController();
-		const onAbort = () => controller.abort();
+		const onAbort = () => {
+			this.logWarn(requestTag, "Abort signal received while waiting for HTTP response.");
+			controller.abort();
+		};
 		signal.addEventListener("abort", onAbort);
 		const tokenDisp = token.onCancellationRequested(onAbort);
 
 		let response: Response;
 		try {
+			this.logInfo(requestTag, `Sending HTTP POST to ${this.sanitizeUrlForLog(url)}`);
 			response = await fetch(url, {
 				method: "POST",
 				headers,
@@ -380,8 +466,11 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 
 		if (!response.ok) {
 			const errorText = await response.text();
+			this.logWarn(requestTag, `HTTP response not OK. status=${response.status} ${response.statusText}`);
 			throw new RetryableHttpError(response.status, response.statusText, errorText || undefined, url);
 		}
+
+		this.logInfo(requestTag, `HTTP response received. status=${response.status} ${response.statusText}`);
 
 		return response;
 	}
@@ -390,17 +479,26 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		adapter: BaseAdapter,
 		body: ReadableStream<Uint8Array>,
 		progress: SafeProgressReporter,
-		token: CancellationToken
+		token: CancellationToken,
+		requestTag: string
 	): Promise<{ responseId?: string }> {
 		try {
+			this.logInfo(requestTag, "Beginning response stream processing.");
 			return await adapter.processStream(body, progress, token);
 		} catch (error) {
 			const cause = error instanceof Error ? error : new Error(String(error));
+			if (adapter.lastStreamInterruptedDuringThinking) {
+				this.logWarn(
+					requestTag,
+					"Response stream failed while a thinking section was active."
+				);
+			}
+			this.logWarn(requestTag, `Response stream failed: ${cause.message}`);
 			throw createNetworkRetryError(`Response stream failed: ${cause.message}`, cause);
 		}
 	}
 
-	private createUserVisibleRequestError(modelId: string, error: unknown): Error {
+	private createUserVisibleRequestError(modelId: string, error: unknown, requestTag?: string): Error {
 		const message = error instanceof Error ? error.message : String(error);
 		OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] Request failed for ${modelId}`);
 		OUTPUT_CHANNEL.appendLine(message);
@@ -412,6 +510,9 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			modelId,
 			error: message,
 		});
+		if (requestTag) {
+			this.logError(requestTag, `Request failed: ${message}`);
+		}
 		
 		const displayType = "OmniChat API Request Error";
 		// To prevent VS Code from displaying giant raw HTML stack traces in chat responses,
@@ -425,9 +526,9 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 	private reportRetryNotice(
 		info: Parameters<NonNullable<Parameters<typeof executeWithRetry>[2]>>[0],
 		progress: SafeProgressReporter,
-		state: RetryNoticeState
+		state: RetryNoticeState,
+		requestTag: string
 	): void {
-		state.count += 1;
 		const nextTimeText = info.nextRetryAt.toLocaleTimeString("zh-CN", {
 			hour12: false,
 			hour: "2-digit",
@@ -435,12 +536,17 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 			second: "2-digit",
 		});
 		const reasonLabel = RETRY_REASON_LABELS[info.reason];
-		const prefix = state.count > 1 ? "\n" : "";
-		const body = `${prefix}${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+		const body = `${reasonLabel}. Retrying ${info.attemptNumber}/${info.maxAttempts} at ${nextTimeText}.`;
+		this.logWarn(
+			requestTag,
+			`${reasonLabel}. Retry ${info.attemptNumber}/${info.maxAttempts} scheduled at ${info.nextRetryAt.toISOString()}. error=${info.error.message}`
+		);
 
-		if (!state.activeId) {
-			state.activeId = `retry_notice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+		if (state.activeId) {
+			progress.report(new vscode.LanguageModelThinkingPart("", state.activeId));
 		}
+
+		state.activeId = `retry_notice_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 		progress.report(new vscode.LanguageModelThinkingPart(body, state.activeId, {
 			type: "retry_notice",
 			attemptNumber: info.attemptNumber,
@@ -465,16 +571,50 @@ export class OmniChatProvider implements LanguageModelChatProvider {
 		return findConfiguredModelById(scopedId);
 	}
 
-	private async applyDelay(model?: ModelItem): Promise<void> {
+	private async applyDelay(model?: ModelItem, requestTag?: string): Promise<void> {
 		const delayMs = Config.getDelay(model);
-		if (delayMs > 0 && this._lastRequestTime !== null) {
-			const elapsed = Date.now() - this._lastRequestTime;
-			if (elapsed < delayMs) {
-				await new Promise<void>((resolve) =>
-					setTimeout(resolve, delayMs - elapsed)
-				);
-			}
+		if (delayMs <= 0 || this._lastRequestTime === null) {
+			return;
 		}
+
+		const elapsed = Date.now() - this._lastRequestTime;
+		if (elapsed >= delayMs) {
+			return;
+		}
+
+		const waitMs = delayMs - elapsed;
+		if (requestTag) {
+			this.logInfo(requestTag, `Applying configured delay. waitMs=${waitMs}, configuredDelayMs=${delayMs}, elapsedSinceLastStartMs=${elapsed}`);
+		}
+		await new Promise<void>((resolve) => setTimeout(resolve, waitMs));
+		if (requestTag) {
+			this.logInfo(requestTag, `Delay finished after ${waitMs}ms.`);
+		}
+	}
+
+	private createRequestTag(modelId: string): string {
+		this._requestSequence += 1;
+		return `req-${this._requestSequence}:${modelId}`;
+	}
+
+	private sanitizeUrlForLog(url: string): string {
+		return url.replace(/[?&]([^=]*key|token|secret|password)=([^&]+)/gi, (_m, key) => `?${key}=***`);
+	}
+
+	private logInfo(requestTag: string, message: string): void {
+		this.appendOutput("INFO", requestTag, message);
+	}
+
+	private logWarn(requestTag: string, message: string): void {
+		this.appendOutput("WARN", requestTag, message);
+	}
+
+	private logError(requestTag: string, message: string): void {
+		this.appendOutput("ERROR", requestTag, message);
+	}
+
+	private appendOutput(level: "INFO" | "WARN" | "ERROR", requestTag: string, message: string): void {
+		OUTPUT_CHANNEL.appendLine(`[${new Date().toISOString()}] [${level}] [${requestTag}] ${message}`);
 	}
 
 	private createAdapter(apiMode: ApiMode): BaseAdapter {

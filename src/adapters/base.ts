@@ -469,11 +469,12 @@ export abstract class BaseAdapter {
 		usage: { promptTokens?: number; completionTokens?: number; totalTokens?: number }
 	): void {
 		try {
-			progress.report({ 
-				type: "usage", 
-				value: usage 
+			progress.report({
+				kind: "usage",
+				promptTokens: usage.promptTokens,
+				completionTokens: usage.completionTokens,
 			} as any);
-		} catch (e) {
+		} catch {
 			// ignore
 		}
 	}

@@ -33,7 +33,7 @@ export function buildGeminiApiUrl(
 	action: GeminiEndpointAction,
 	apiKey?: string
 ): string {
-	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "");
+	const normalizedBaseUrl = baseUrl.replace(/\/+$/, "").trim();
 	const normalizedModelId = normalizeGeminiModelId(modelId);
 	const searchParams = new URLSearchParams();
 	if (action === "streamGenerateContent") {
@@ -45,15 +45,7 @@ export function buildGeminiApiUrl(
 	const suffixStr = searchParams.toString();
 	const suffix = suffixStr ? `?${suffixStr}` : "";
 
-	if (/\/v1beta\/models$/i.test(normalizedBaseUrl)) {
-		return `${normalizedBaseUrl}/${normalizedModelId}:${action}${suffix}`;
-	}
-
-	if (/\/v1beta$/i.test(normalizedBaseUrl)) {
-		return `${normalizedBaseUrl}/models/${normalizedModelId}:${action}${suffix}`;
-	}
-
-	return `${normalizedBaseUrl}/v1beta/models/${normalizedModelId}:${action}${suffix}`;
+	return `${normalizedBaseUrl}/models/${normalizedModelId}:${action}${suffix}`;
 }
 
 interface GeminiPart {

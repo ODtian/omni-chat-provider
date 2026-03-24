@@ -52,6 +52,11 @@ Add provider backends in `settings.json`:
     "apiMode": "openai"
   },
   {
+    "id": "gemini",
+    "baseUrl": "https://generativelanguage.googleapis.com/v1beta",
+    "apiMode": "gemini"
+  },
+  {
     "id": "anthropic",
     "baseUrl": "https://api.anthropic.com",
     "apiMode": "anthropic",
@@ -94,6 +99,14 @@ Each model must point at a provider:
     "thinking": {
       "type": "enabled",
       "budget_tokens": 4096
+    }
+  },
+  {
+    "id": "gemini-3-flash-preview",
+    "provider": "gemini",
+    "maxOutputTokens": 65536,
+    "thinkingConfig": {
+      "includeThoughts": true
     }
   },
   {

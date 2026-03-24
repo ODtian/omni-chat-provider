@@ -131,7 +131,7 @@
 				"omnichat.models": {
 					"type": "array",
 					"default": [],
-					"markdownDescription": "Model configurations. Each entry defines a model with its API endpoint and parameters.\n\nAutocompletion for API-specific parameters is provided based on the `apiMode` value.",
+					"markdownDescription": "Model configurations. Each entry defines a model with its API endpoint and parameters.\n\nAPI-specific suggestions are narrowed by the current `apiMode`.",
 					"items": {
 						"type": "object",
 						"required": ["id"],
@@ -139,12 +139,6 @@
 							"id": {
 								"type": "string",
 								"description": "Model ID (e.g. 'gpt-4o', 'claude-sonnet-4-20250514', 'gemini-2.5-pro')."
-							},
-							"apiMode": {
-								"type": "string",
-								"enum": ["openai", "openai-responses", "ollama", "anthropic", "gemini"],
-								"default": "openai",
-								"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
 							},
 							"owned_by": {
 								"type": "string",
@@ -223,179 +217,189 @@
 							{ "required": ["owned_by"] },
 							{ "required": ["provider"] }
 						],
-						"allOf": [
+						"oneOf": [
 							{
-								"if": {
-									"properties": { "apiMode": { "const": "openai" } }
-								},
-								"then": {
-									"properties": {
-										"max_tokens": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[OpenAI] Maximum tokens to generate."
-										},
-										"max_completion_tokens": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[OpenAI] Max completion tokens (new standard parameter)."
-										},
-										"reasoning_effort": {
-											"type": "string",
-											"enum": ["xhigh", "high", "medium", "low"],
-											"description": "[OpenAI] Reasoning effort level for o-series models."
-										},
-										"frequency_penalty": {
-											"type": "number",
-											"minimum": -2,
-											"maximum": 2,
-											"description": "[OpenAI] Frequency penalty."
-										},
-										"presence_penalty": {
-											"type": "number",
-											"minimum": -2,
-											"maximum": 2,
-											"description": "[OpenAI] Presence penalty."
-										}
+								"title": "OpenAI",
+								"properties": {
+									"apiMode": {
+										"type": "string",
+										"enum": ["openai"],
+										"default": "openai",
+										"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+									},
+									"max_tokens": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[OpenAI] Maximum tokens to generate."
+									},
+									"max_completion_tokens": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[OpenAI] Max completion tokens (new standard parameter)."
+									},
+									"reasoning_effort": {
+										"type": "string",
+										"enum": ["xhigh", "high", "medium", "low"],
+										"description": "[OpenAI] Reasoning effort level for o-series models."
+									},
+									"frequency_penalty": {
+										"type": "number",
+										"minimum": -2,
+										"maximum": 2,
+										"description": "[OpenAI] Frequency penalty."
+									},
+									"presence_penalty": {
+										"type": "number",
+										"minimum": -2,
+										"maximum": 2,
+										"description": "[OpenAI] Presence penalty."
 									}
 								}
 							},
 							{
-								"if": {
-									"properties": { "apiMode": { "const": "openai-responses" } }
-								},
-								"then": {
-									"properties": {
-										"max_output_tokens": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Responses] Maximum output tokens."
-										},
-										"reasoning": {
-											"type": "object",
-											"description": "[Responses] Reasoning configuration.",
-											"properties": {
-												"effort": {
-													"type": "string",
-													"enum": ["xhigh", "high", "medium", "low"],
-													"description": "Reasoning effort level."
-												},
-												"max_tokens": {
-													"type": "number",
-													"minimum": 1,
-													"description": "Max reasoning tokens."
-												}
+								"title": "OpenAI Responses",
+								"required": ["apiMode"],
+								"properties": {
+									"apiMode": {
+										"type": "string",
+										"enum": ["openai-responses"],
+										"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+									},
+									"max_output_tokens": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Responses] Maximum output tokens."
+									},
+									"reasoning": {
+										"type": "object",
+										"description": "[Responses] Reasoning configuration.",
+										"properties": {
+											"effort": {
+												"type": "string",
+												"enum": ["xhigh", "high", "medium", "low"],
+												"description": "Reasoning effort level."
+											},
+											"max_tokens": {
+												"type": "number",
+												"minimum": 1,
+												"description": "Max reasoning tokens."
 											}
 										}
 									}
 								}
 							},
 							{
-								"if": {
-									"properties": { "apiMode": { "const": "anthropic" } }
-								},
-								"then": {
-									"properties": {
-										"max_tokens": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Anthropic] Maximum tokens to generate."
-										},
-										"thinking": {
-											"type": "object",
-											"description": "[Anthropic] Extended thinking configuration.",
-											"properties": {
-												"type": {
-													"type": "string",
-													"enum": ["enabled", "disabled"],
-													"description": "Enable or disable extended thinking."
-												},
-												"budget_tokens": {
-													"type": "number",
-													"minimum": 1024,
-													"description": "Maximum thinking tokens budget."
-												}
+								"title": "Anthropic",
+								"required": ["apiMode"],
+								"properties": {
+									"apiMode": {
+										"type": "string",
+										"enum": ["anthropic"],
+										"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+									},
+									"max_tokens": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Anthropic] Maximum tokens to generate."
+									},
+									"thinking": {
+										"type": "object",
+										"description": "[Anthropic] Extended thinking configuration.",
+										"properties": {
+											"type": {
+												"type": "string",
+												"enum": ["enabled", "disabled"],
+												"description": "Enable or disable extended thinking."
+											},
+											"budget_tokens": {
+												"type": "number",
+												"minimum": 1024,
+												"description": "Maximum thinking tokens budget."
 											}
-										},
-										"top_k": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Anthropic] Top-K sampling."
+										}
+									},
+									"top_k": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Anthropic] Top-K sampling."
+									}
+								}
+							},
+							{
+								"title": "Gemini",
+								"required": ["apiMode"],
+								"properties": {
+									"apiMode": {
+										"type": "string",
+										"enum": ["gemini"],
+										"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+									},
+									"maxOutputTokens": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Gemini] Maximum output tokens."
+									},
+									"topK": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Gemini] Top-K sampling."
+									},
+									"topP": {
+										"type": "number",
+										"minimum": 0,
+										"maximum": 1,
+										"description": "[Gemini] Top-P sampling."
+									},
+									"thinkingConfig": {
+										"type": "object",
+										"description": "[Gemini] Thinking configuration.",
+										"properties": {
+											"thinkingBudget": {
+												"type": "number",
+												"description": "Maximum thinking tokens."
+											}
 										}
 									}
 								}
 							},
 							{
-								"if": {
-									"properties": { "apiMode": { "const": "gemini" } }
-								},
-								"then": {
-									"properties": {
-										"maxOutputTokens": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Gemini] Maximum output tokens."
-										},
-										"topK": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Gemini] Top-K sampling."
-										},
-										"topP": {
-											"type": "number",
-											"minimum": 0,
-											"maximum": 1,
-											"description": "[Gemini] Top-P sampling."
-										},
-										"thinkingConfig": {
-											"type": "object",
-											"description": "[Gemini] Thinking configuration.",
-											"properties": {
-												"thinkingBudget": {
-													"type": "number",
-													"description": "Maximum thinking tokens."
-												}
-											}
-										}
-									}
-								}
-							},
-							{
-								"if": {
-									"properties": { "apiMode": { "const": "ollama" } }
-								},
-								"then": {
-									"properties": {
-										"num_predict": {
-											"type": "number",
-											"minimum": -1,
-											"description": "[Ollama] Maximum tokens to predict. -1 for infinite."
-										},
-										"num_ctx": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Ollama] Context window size."
-										},
-										"num_gpu": {
-											"type": "number",
-											"minimum": 0,
-											"description": "[Ollama] Number of GPU layers."
-										},
-										"top_k": {
-											"type": "number",
-											"minimum": 1,
-											"description": "[Ollama] Top-K sampling."
-										},
-										"min_p": {
-											"type": "number",
-											"minimum": 0,
-											"maximum": 1,
-											"description": "[Ollama] Minimum probability threshold."
-										},
-										"repeat_penalty": {
-											"type": "number",
-											"description": "[Ollama] Repetition penalty."
-										}
+								"title": "Ollama",
+								"required": ["apiMode"],
+								"properties": {
+									"apiMode": {
+										"type": "string",
+										"enum": ["ollama"],
+										"markdownDescription": "API format to use:\n- `openai` — Chat Completions `/chat/completions`\n- `openai-responses` — Responses API `/responses`\n- `ollama` — Ollama `/api/chat`\n- `anthropic` — Anthropic `/v1/messages`\n- `gemini` — Gemini `:streamGenerateContent`"
+									},
+									"num_predict": {
+										"type": "number",
+										"minimum": -1,
+										"description": "[Ollama] Maximum tokens to predict. -1 for infinite."
+									},
+									"num_ctx": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Ollama] Context window size."
+									},
+									"num_gpu": {
+										"type": "number",
+										"minimum": 0,
+										"description": "[Ollama] Number of GPU layers."
+									},
+									"top_k": {
+										"type": "number",
+										"minimum": 1,
+										"description": "[Ollama] Top-K sampling."
+									},
+									"min_p": {
+										"type": "number",
+										"minimum": 0,
+										"maximum": 1,
+										"description": "[Ollama] Minimum probability threshold."
+									},
+									"repeat_penalty": {
+										"type": "number",
+										"description": "[Ollama] Repetition penalty."
 									}
 								}
 							}
